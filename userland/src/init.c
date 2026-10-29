@@ -215,6 +215,47 @@ flash_root(const char *dev)
 		}
 		check(ok, "Sileo's programs in /bin, over the volume's own");
 	}
+	if (stat("/wallpaper", &fw_st) == 0) {
+		/*
+		 * The wallpapers at 2x. iOS 16.5 has its wallpapers for the iPhone only at 3x, and WallpaperKit
+		 * takes the one whose screen class is the display's ("375w-812h@2x~iphone" with fbscale=2): none,
+		 * and PosterBoard draws black, with nothing to choose from either. The boot volume's /wallpaper
+		 * has a twin of each, its Wallpaper.plist saying 2x and the rest links to the 3x one
+		 * (userland/build.sh), one directory per collection, over that collection's Wallpapers as a union.
+		 */
+		int cols = 0, over = 0;
+
+		pos = 0;
+		fd = open("/wallpaper", O_RDONLY | O_DIRECTORY, 0);
+		while (fd >= 0 && (n = getdirentries(fd, buf, sizeof(buf), &pos)) > 0) {
+			for (char *p = buf; p < buf + n;) {
+				struct dirent *de = (struct dirent *)(void *)p;
+
+				if (de->d_reclen == 0) {
+					break;
+				}
+				p += de->d_reclen;
+				if (de->d_name[0] == '.' || de->d_namlen >= sizeof(name)) {
+					continue;
+				}
+				memcpy(name, de->d_name, de->d_namlen);
+				name[de->d_namlen] = 0;
+				cols++;
+				strcpy(from, join("/wallpaper/", name, ""));
+				strcpy(to, join("/flash/Library/Wallpaper/Collections/", name, "/Wallpapers"));
+				if (mount("bindfs", to, MNT_RDONLY | MNT_UNION, (void *)from) == 0) {
+					over++;
+				} else {
+					printf("  bindfs %s on %s, union: %s\n", from, to, strerror(errno));
+				}
+			}
+		}
+		if (fd >= 0) {
+			close(fd);
+		}
+		printf("  wallpapers at 2x: %d of %d collections\n", over, cols);
+		check(cols > 0 && over == cols, "the wallpapers at 2x, over the volume's 3x ones");
+	}
 
 	fd = open("/flash/private/var/staged_system_apps", O_RDONLY | O_DIRECTORY, 0);
 	while (fd >= 0 && (n = getdirentries(fd, buf, sizeof(buf), &pos)) > 0) {

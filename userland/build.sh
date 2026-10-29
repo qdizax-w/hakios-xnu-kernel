@@ -552,6 +552,38 @@ if [ -n "$FLASHBOOT" ] && [ -f $CACHE/dyld_shared_cache_arm64 ]; then
 		done
 		echo "  the package manager's prefix: $(du -sh flashboot/jb | cut -f1) as /jb of the boot volume"
 	fi
+	# the wallpapers at 2x: iOS 16.5 has the iPhone's only at 3x, and WallpaperKit takes the one whose
+	# Wallpaper.plist names the display's screen class ("375w-812h@2x~iphone" with fbscale=2) -- none, and
+	# PosterBoard draws black. A twin of each 3x one, its plist saying 2x and the rest links to the 3x
+	# one's files; init puts each collection's twins over its Wallpapers as a union (src/init.c, flash_root)
+	if [ -d $IOS/rootfs/Library/Wallpaper/Collections ]; then
+		rm -rf flashboot/wallpaper
+		python3 - $IOS/rootfs/Library/Wallpaper/Collections flashboot/wallpaper <<'EOF'
+import os, plistlib, sys
+src, dst = sys.argv[1:3]
+n = 0
+for col in sorted(os.listdir(src)):
+    walls = os.path.join(src, col, 'Wallpapers')
+    if not os.path.isdir(walls):
+        continue
+    for w in sorted(os.listdir(walls)):
+        if '@3x~' not in w or not os.path.isfile(os.path.join(walls, w, 'Wallpaper.plist')):
+            continue
+        twin = os.path.join(dst, col, w.replace('@3x~', '@2x~'))
+        os.makedirs(twin)
+        on_phone = '/Library/Wallpaper/Collections/%s/Wallpapers/%s/' % (col, w)
+        for f in os.listdir(os.path.join(walls, w)):
+            if f != 'Wallpaper.plist':
+                os.symlink(on_phone + f, os.path.join(twin, f))
+        with open(os.path.join(walls, w, 'Wallpaper.plist'), 'rb') as f:
+            p = plistlib.load(f)
+        p['logicalScreenClass'] = p.get('logicalScreenClass', '').replace('@3x~', '@2x~')
+        with open(os.path.join(twin, 'Wallpaper.plist'), 'wb') as f:
+            plistlib.dump(p, f)
+        n += 1
+print('  wallpapers at 2x: %d twins of the 3x ones' % n)
+EOF
+	fi
 	python3 ../tools/apfs/mkapfs.py -z --plain fw -o flashboot.boot.apfs Boot=flashboot | tail -1
 	[ -z "$CHECK" ] || ../tools/apfs/check-image.sh flashboot.boot.apfs Boot=flashboot
 	# the third container: Apple's App cryptex as it is (10 MB; unpack.sh), for the boot volume's Cryptexes/App
