@@ -221,8 +221,6 @@ if [ -d $IOS/rootfs/usr/lib ]; then
 		$DYN -dynamiclib -install_name /redwood/lib/libhakios.dylib -framework CoreFoundation -framework IOKit -lobjc \
 			-o obj/libhakios.dylib src/inject.c
 		$DYN -dynamiclib -install_name /redwood/lib/libhakios.sb.dylib -framework CoreFoundation -framework IOKit -lobjc \
-			-Wl,-U,_BKSDisplayBrightnessSet -Wl,-U,_BKSDisplayBrightnessSetWithImplicitTransaction \
-			-Wl,-U,_BKSDisplayBrightnessIsBrightnessLevelControlAvailable \
 			-o obj/libhakios.sb.dylib src/inject_sb.c
 		# ... the tweak loader of the package manager's prefix (src/inject_tweaks.c): it goes into a
 		# program either as the one library the kernel inserts or opened by a library of ours

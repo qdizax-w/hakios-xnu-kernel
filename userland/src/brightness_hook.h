@@ -1,7 +1,7 @@
 /*
  * The brightness iOS asks for, to the panel's backlight: /dev/hakios-backlight (miatoll:
  * bsd/dev/hakios.miatoll_backlight.c, boot-arg backlight=2), thousandths as a 32-bit number. Included by
- * inject_sb.c (SpringBoard: Control Center's slider, the brightness keys) and inject_tweaks.c (every
+ * inject.c (backboardd: Control Center's slider), inject_sb.c (SpringBoard: the brightness keys) and inject_tweaks.c (every
  * program the tweak loader is in, Preferences among them: Settings > Display & Brightness).
  *
  * There is no backlight service here for CoreBrightness to drive, so backboardd says brightness control is

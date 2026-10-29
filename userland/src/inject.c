@@ -1115,6 +1115,26 @@ opengl_es(void)
 	gl_function_refused = (void (*)(unsigned))dlsym(library, "hakios_gl_function_refused");
 }
 
+/*
+ * The brightness, caught in backboardd as well: Control Center's slider sends its levels here (backboardd logs
+ * "brightness change ... reason:setDisplayBrightness" and sets them with -[BrightnessSystemClient setProperty:forKey:]),
+ * and the hooks in SpringBoard never see them. brightness_hook.h says how they are caught.
+ */
+static void bh_say(const char *format, ...) __printflike(1, 2);
+#include "brightness_hook.h"
+
+static void
+bh_say(const char *format, ...)
+{
+	char line[256];
+	va_list ap;
+
+	va_start(ap, format);
+	vsnprintf(line, sizeof(line), format, ap);
+	va_end(ap);
+	say("%s", line);
+}
+
 __attribute__((constructor))
 static void
 hakios_init(void)
@@ -1131,6 +1151,7 @@ hakios_init(void)
 		char arguments[1024] = "";
 		size_t size = sizeof(arguments) - 1;
 
+		bh_install(false);             /* Control Center's brightness slider (brightness_hook.h) */
 		/*
 		 * Boot-arg ca_vbl=1: CoreAnimation's frame clock from the display driver's refresh
 		 * notifications. QuartzCore takes them (IOMobileFramebufferEnableVSyncNotifications) only on
