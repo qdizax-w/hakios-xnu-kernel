@@ -891,11 +891,14 @@ rail_position(const char *name, uint32_t level, uint32_t *address)
 		if (bells_apcs) {
 			/* miatoll: the boot loader leaves the database's address in the AOP's message RAM (dt: qcom,cmd-db@c3f000c) */
 			vm_offset_t at = ml_io_map(0x0c3f0000, 0x1000);
+			/* (two words: the database's address and its size, as Android's cmd-db.c reads them) */
+			uint32_t size;
 
-			where = rd(at + 0xc) | (uint64_t)rd(at + 0x10) << 32;
+			where = rd(at + 0xc);
+			size = rd(at + 0x10);
 			ml_io_unmap(at, 0x1000);
-			printf("adsp: %u: the command database is at %#llx (the AOP says)\n", step, where);
-			if (where == 0 || where >> 32) {
+			printf("adsp: %u: the command database is at %#llx, %#x bytes (the AOP says)\n", step, where, size);
+			if (where == 0 || size == 0) {
 				return -1;
 			}
 		}
