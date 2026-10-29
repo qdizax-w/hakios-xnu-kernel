@@ -3697,7 +3697,8 @@ rmtfs_buffer_make(void)
 	if (rmtfs_window != NULL) {
 		return true;
 	}
-	rmtfs_buffer_pa = RMTFS_BUFFER_PA_DEFAULT;
+	/* miatoll: the POCO's 0x9c700000 is inside this phone's framebuffer (cont_splash 0x9c000000, 23 MB): its compute DSP's reserved memory instead (dt: cdsp_regions@8f300000, 30 MB; not started here either) */
+	rmtfs_buffer_pa = bells_apcs ? 0x8f300000ull : RMTFS_BUFFER_PA_DEFAULT;
 	PE_parse_boot_argn("modem_buffer", &rmtfs_buffer_pa, sizeof(rmtfs_buffer_pa));      /* (another region, to try) */
 	rmtfs_window = (volatile uint8_t *)ml_io_map_unmappable((vm_offset_t)rmtfs_buffer_pa, RMTFS_BUFFER_SIZE, VM_WIMG_WCOMB);
 	if (rmtfs_window == NULL) {
@@ -4619,7 +4620,7 @@ jsn_string(const char *from, const char *end, const char *key, char *out, size_t
 static void
 servreg_load(void)
 {
-	static const char *const files[] = { "modemr.jsn", "adspr.jsn", "adsps.jsn", "adspua.jsn", "battmgr.jsn", "cdspr.jsn", "wpssr.jsn" };
+	static const char *const files[] = { "modemr.jsn", "modemuw.jsn", "adspr.jsn", "adsps.jsn", "adspua.jsn", "battmgr.jsn", "cdspr.jsn", "wpssr.jsn" };
 
 	servreg_maps = 0;
 	for (unsigned f = 0; f < sizeof(files) / sizeof(files[0]); f++) {
@@ -6344,6 +6345,20 @@ whole_thread(__unused void *parameter, __unused wait_result_t result)
 	/* (the firmware may be on the root file system, which is not mounted yet when this begins: a minute at most) */
 	for (unsigned waited = 0; waited < 300 && rootvnode == NULLVP; waited++) {
 		sleep_ms(200);
+	}
+	{
+		/*
+		 * modem_after=S: S seconds more before the modem is touched (miatoll: 45 by default), so that iOS is up and
+		 * its log can be read over the USB cable (usbnet=1) while the modem comes up -- and anything that goes
+		 * wrong with it happens to a phone already in use, not to one still starting.
+		 */
+		uint32_t after = bells_apcs ? 45 : 0;
+
+		PE_parse_boot_argn("modem_after", &after, sizeof(after));
+		if (after != 0) {
+			tell("mpss: the modem is brought up %u s from now (modem_after)\n", after);
+			sleep_ms(after * 1000);
+		}
 	}
 	run_steps();
 	for (unsigned i = 0; i < sizeof(qrtr_servers) / sizeof(qrtr_servers[0]); i++) {

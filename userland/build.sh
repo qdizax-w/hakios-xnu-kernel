@@ -548,6 +548,11 @@ if [ -n "$FLASHBOOT" ] && [ -f $CACHE/dyld_shared_cache_arm64 ]; then
 	if [ -f ../fw-modem/modem.mdt ]; then
 		mkdir -p flashboot/fw
 		cp ../fw-modem/modem.mdt ../fw-modem/modem.b[0-9][0-9] flashboot/fw/
+		# ... and what it reads over TFTP (the Wi-Fi's firmware wlanmdsp.mbn and board files bdwlan.*, its
+		# carrier configurations), as in the system image's /fw/image
+		if [ -d ../fw-modem/image ]; then
+			rm -rf flashboot/fw/image && cp -R ../fw-modem/image flashboot/fw/image
+		fi
 	fi
 	# the package manager's prefix, when tools/mk-jb.sh has fetched one: /jb of the boot volume, which is
 	# /private/preboot/jb once the iOS volume is the root -- the volume where a rootless jailbreak keeps its
