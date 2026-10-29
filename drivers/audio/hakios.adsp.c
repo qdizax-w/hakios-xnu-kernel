@@ -110,6 +110,7 @@ extern int mdevgetkernelrange(dev_t dev, vm_offset_t *base, uint64_t *size);
 extern lck_mtx_t hakios_aop_mailbox_lock;
 extern lck_mtx_t hakios_smem_alloc_lock;
 extern lck_mtx_t hakios_rsc_lock;            /* RPMh's sequencer, shared with the other DSP's driver */
+extern lck_mtx_t hakios_scm_lock;       /* one call into TrustZone at a time (hakios.platform.c) */
 
 static LCK_GRP_DECLARE(adsp_lock_group, "hakios-adsp");
 
@@ -258,9 +259,26 @@ hold(void)
 	}
 }
 
+/*
+ * The number on the screen (hakios_mark(), row 0, cyan) at each step: what a phone stopped dead shows. 1-3 the steps,
+ * 4 TrustZone asked for the image's signature, 5 for its memory, 6 its memory given, 7 the image written, 8 our SMP2P
+ * item, 9 RPMh asked for the rails, 10 the always-on processor told, 11 TrustZone asked to start the DSP, 12 started,
+ * 13-16 GLINK, the channel, QRTR, APR; 17 up. The sound goes on from 20 (hakios.sound.c).
+ */
+static void
+mark(unsigned value)
+{
+	hakios_mark(0, value);
+}
+
 static void
 announce(const char *what)
 {
+	static const uint8_t marks[STEPS + 1] = { 0, 1, 2, 3, 4, 7, 8, 9, 13, 14, 15, 16 };
+
+	if (step <= STEPS) {
+		mark(marks[step]);
+	}
 	printf("adsp: step %u: %s\n", step, what);
 	hold();
 }
@@ -1329,7 +1347,13 @@ scm(const char *what, uint64_t function, uint64_t arguments, uint64_t first, uin
 	printf("adsp: %u: about to ask TrustZone %s: smc %#llx, arguments %#llx, %#llx, %#llx\n", step, what, function, first,
 	    second, third);
 	snprintf(last_write, sizeof(last_write), "step %u asked TrustZone %#llx(%#llx, %#llx)", step, function, first, second);
-	for (int i = 0; i < 100; i++) {
+	/*
+	 * Resumed for as long as TrustZone says the call was interrupted, as Linux does (qcom_scm-smc.c): a long call (the
+	 * memory of a DSP set up) is interrupted by every interrupt that comes, and late in a boot there are many; given up
+	 * after a hundred, it was left half way in TrustZone, and the next call stopped the phone dead (miatoll, 30 October).
+	 */
+	lck_mtx_lock(&hakios_scm_lock);
+	for (uint64_t i = 0;; i++) {
 		register uint64_t x0 __asm__("x0") = i == 0 ? function : SCM_INTERRUPTED;
 		register uint64_t x1 __asm__("x1") = arguments;
 		register uint64_t x2 __asm__("x2") = first;
@@ -1343,13 +1367,12 @@ scm(const char *what, uint64_t function, uint64_t arguments, uint64_t first, uin
 		    "+r" (x7) : : "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "memory");
 		session = x6;
 		if (x0 != SCM_INTERRUPTED) {
-			printf("adsp: %u: TrustZone returns %d, answer %#llx\n", step, (int32_t)x0, x1);
+			printf("adsp: %u: TrustZone returns %d, answer %#llx (%llu times resumed)\n", step, (int32_t)x0, x1, i);
 			*answer = x1;
+			lck_mtx_unlock(&hakios_scm_lock);
 			return (int32_t)x0;
 		}
 	}
-	printf("adsp: %u: TrustZone keeps saying the call was interrupted\n", step);
-	return -1;
 }
 
 static uint32_t
@@ -1527,7 +1550,9 @@ step_header(void)
 	printf("adsp: %u: TRUSTZONE ACCEPTS THE AUDIO DSP'S SIGNATURE FROM THIS KERNEL\n", step);
 
 	announce("tell TrustZone where the image will be");
+	mark(5);
 	result = scm("where the image will be", SCM_PAS_MEM_SETUP, SCM_THREE_VALUES, PAS_ADSP, adsp_memory, image.size, &answer);
+	mark(6);
 	if (result != 0 || answer != 0) {
 		printf("adsp: %u: TRUSTZONE DOES NOT TAKE THE PLACE: the call returns %d, its answer is %#llx\n", step, result, answer);
 		return false;
@@ -1780,14 +1805,17 @@ step_start(void)
 		return false;
 	}
 	rails_asked = true;
+	mark(10);
 	if (!mailbox_send("{class: image, res: load_state, name: adsp, val: on}")) {
 		rails(0);
 		rails_asked = false;
 		lck_mtx_unlock(&dsp_lock);
 		return false;
 	}
+	mark(11);
 	result = scm("to authenticate the audio DSP's image and start it", SCM_PAS_AUTH_AND_RESET, SCM_ONE_VALUE, PAS_ADSP, 0, 0,
 	    &answer);
+	mark(12);
 	doorbell.since = started = now_us();
 	image_written = false;
 	if (result != 0 || answer != 0) {
@@ -3357,6 +3385,7 @@ whole_thread(__unused void *parameter, __unused wait_result_t result)
 	if (step == STEPS && dsp_started) {
 		tell("adsp: THE AUDIO DSP IS UP AND LINKED, its audio services up (APR), %llu ms after the kernel began on it (the "
 		    "root's waited for included): node %u, %u services; it stays on\n", (now_us() - began) / 1000, qrtr_peer, services);
+		mark(17);
 		hakios_sound_dsp_up();         /* (boot-arg sound=N: the speakers' path, hakios.sound.c) */
 		hakios_mic_dsp_up();           /* (boot-arg mic=N: the microphones' path, hakios.mic.c) */
 		battmgr_start();                /* (how the battery is, from the DSP; battmgr=0: not asked) */

@@ -79,6 +79,7 @@
 #include <pexpert/pexpert.h>
 #include <sys/systm.h>
 #include <sys/hakios.audio.h>
+#include <sys/hakios.input.h>
 #include <vm/vm_kern.h>
 
 extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
@@ -1464,6 +1465,7 @@ sound_thread(__unused void *parameter, __unused wait_result_t result)
 		}
 	}
 	if (level >= 2) {
+		hakios_mark(0, 23);            /* (the numbers on the screen: hakios.adsp.c; 20 on are the sound's) */
 		lck_mtx_lock(&hakios_smmu_lock);
 		ok = shared_get(0);
 		lck_mtx_unlock(&hakios_smmu_lock);
@@ -1475,10 +1477,13 @@ sound_thread(__unused void *parameter, __unused wait_result_t result)
 	}
 	announce(miatoll ? "the MI2S pins (GPIO 63 to 66) to the interface, as Android's active state has them" :
 	    "the TDM pins (GPIO 97 to 100) to the interface, as Android's active state has them");
+	hakios_mark(0, 20);
 	pins_on();
+	hakios_mark(0, 21);
 	if (!afe_on()) {
 		goto out;
 	}
+	hakios_mark(0, 22);
 	sleep_ms(20);
 	pin_activity(tdm_pins[0].pin, tdm_pins[0].name, &changes, &ones);
 	pin_activity(tdm_pins[1].pin, tdm_pins[1].name, &sync_changes, &sync_ones);
@@ -1489,6 +1494,7 @@ sound_thread(__unused void *parameter, __unused wait_result_t result)
 		ok = true;
 		goto out;
 	}
+	hakios_mark(0, 24);
 	if (!stream_on()) {
 		goto out;
 	}
@@ -1496,9 +1502,11 @@ sound_thread(__unused void *parameter, __unused wait_result_t result)
 		thread_t feeder;
 
 		announce("the amplifiers, set up from Android's Music profile, powered down until iOS plays");
+		hakios_mark(0, 25);
 		if (!hakios_speaker_prepare(acf, acf_size)) {
 			goto out;
 		}
+		hakios_mark(0, 26);
 		hakios_adsp_fw_free(acf, acf_size);
 		acf = NULL;
 		feeder_runs = true;
@@ -1510,6 +1518,7 @@ sound_thread(__unused void *parameter, __unused wait_result_t result)
 		thread_deallocate(feeder);
 		watcher_runs = true;
 		hakios_audio_set_sink("the speakers (the audio DSP, hakios.sound.c)", ios_sink);
+		hakios_mark(0, 27);
 		say("sound: WHAT IOS PLAYS GOES TO THE SPEAKERS from here on, %u.%03u dB under Android's level, until the run ends\n",
 		    below / 8, below % 8 * 125);
 		say("sound: through the guard (hakios.guard.c): %u.%03u dB of gain first (sound_gain), then high-pass at 200 Hz; peaks "

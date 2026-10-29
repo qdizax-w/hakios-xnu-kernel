@@ -97,6 +97,7 @@ extern void FlushPoC_DcacheRegion(vm_offset_t va, size_t length);   /* osfmk/arm
 extern lck_mtx_t hakios_aop_mailbox_lock;
 extern lck_mtx_t hakios_smem_alloc_lock;
 extern lck_mtx_t hakios_rsc_lock;            /* RPMh's sequencer, shared with the other DSP's driver */
+extern lck_mtx_t hakios_scm_lock;       /* one call into TrustZone at a time (hakios.platform.c) */
 
 static LCK_GRP_DECLARE(mpss_lock_group, "hakios-mpss");
 
@@ -258,6 +259,12 @@ hold(void)
 static void
 announce(const char *what)
 {
+	/* the number on the screen (hakios_mark(), row 1, yellow), as the audio DSP's (hakios.adsp.c, announce()) */
+	static const uint8_t marks[STEPS + 1] = { 0, 1, 2, 3, 4, 7, 8, 9, 13, 14, 15, 16 };
+
+	if (step <= STEPS) {
+		hakios_mark(1, marks[step]);
+	}
 	printf("mpss: step %u: %s\n", step, what);
 	hold();
 }
@@ -1366,7 +1373,13 @@ scm(const char *what, uint64_t function, uint64_t arguments, uint64_t first, uin
 	printf("mpss: %u: about to ask TrustZone %s: smc %#llx, arguments %#llx, %#llx, %#llx\n", step, what, function, first,
 	    second, third);
 	snprintf(last_write, sizeof(last_write), "step %u asked TrustZone %#llx(%#llx, %#llx)", step, function, first, second);
-	for (int i = 0; i < 100; i++) {
+	/*
+	 * Resumed for as long as TrustZone says the call was interrupted, as Linux does (qcom_scm-smc.c): a long call (the
+	 * memory of a DSP set up) is interrupted by every interrupt that comes, and late in a boot there are many; given up
+	 * after a hundred, it was left half way in TrustZone, and the next call stopped the phone dead (miatoll, 30 October).
+	 */
+	lck_mtx_lock(&hakios_scm_lock);
+	for (uint64_t i = 0;; i++) {
 		register uint64_t x0 __asm__("x0") = i == 0 ? function : SCM_INTERRUPTED;
 		register uint64_t x1 __asm__("x1") = arguments;
 		register uint64_t x2 __asm__("x2") = first;
@@ -1380,13 +1393,12 @@ scm(const char *what, uint64_t function, uint64_t arguments, uint64_t first, uin
 		    "+r" (x7) : : "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "memory");
 		session = x6;
 		if (x0 != SCM_INTERRUPTED) {
-			printf("mpss: %u: TrustZone returns %d, answer %#llx\n", step, (int32_t)x0, x1);
+			printf("mpss: %u: TrustZone returns %d, answer %#llx (%llu times resumed)\n", step, (int32_t)x0, x1, i);
 			*answer = x1;
+			lck_mtx_unlock(&hakios_scm_lock);
 			return (int32_t)x0;
 		}
 	}
-	printf("mpss: %u: TrustZone keeps saying the call was interrupted\n", step);
-	return -1;
 }
 
 static uint32_t
@@ -1570,11 +1582,13 @@ step_header(void)
 	printf("mpss: %u: TRUSTZONE ACCEPTS THE MODEM'S SIGNATURE FROM THIS KERNEL\n", step);
 
 	announce("tell TrustZone where the image will be: the whole of the modem's memory, as Linux does");
+	hakios_mark(1, 5);
 	result = scm("where the image will be", SCM_PAS_MEM_SETUP, SCM_THREE_VALUES, pas_mpss, mpss_memory, mpss_memory_size, 0, &answer);
 	if (result != 0 || answer != 0) {
 		printf("mpss: %u: TRUSTZONE DOES NOT TAKE THE PLACE: the call returns %d, its answer is %#llx\n", step, result, answer);
 		return false;
 	}
+	hakios_mark(1, 6);
 	printf("mpss: %u: TrustZone takes the place: %#x bytes at %#x (the image takes %#x of them)\n", step, mpss_memory_size, mpss_memory,
 	    image.size);
 	return true;
@@ -2533,14 +2547,17 @@ step_start(void)
 		return false;
 	}
 	rails_asked = true;
+	hakios_mark(1, 10);
 	if (!mailbox_send("{class: image, res: load_state, name: modem, val: on}")) {
 		rails(0);
 		rails_asked = false;
 		lck_mtx_unlock(&dsp_lock);
 		return false;
 	}
+	hakios_mark(1, 11);
 	result = scm("to authenticate the modem's image and start it", SCM_PAS_AUTH_AND_RESET, SCM_ONE_VALUE, pas_mpss, 0, 0, 0,
 	    &answer);
+	hakios_mark(1, 12);
 	doorbell.since = started = now_us();
 	image_written = false;
 	if (result != 0 || answer != 0) {

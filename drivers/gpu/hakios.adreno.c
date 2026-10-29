@@ -1724,7 +1724,12 @@ scm(const char *what, uint64_t function, uint64_t arguments, uint64_t first, uin
 	    second, third);
 	snprintf(last_write, sizeof(last_write), "step %u asked TrustZone %#llx(%#llx, %#llx)", step, function, first, second);
 	hold(true);
-	for (int i = 0; i < 100; i++) {
+	/*
+	 * Resumed for as long as TrustZone says the call was interrupted, as Linux does (qcom_scm-smc.c): a long call (the
+	 * memory of a DSP set up) is interrupted by every interrupt that comes, and late in a boot there are many; given up
+	 * after a hundred, it was left half way in TrustZone, and the next call stopped the phone dead (miatoll, 30 October).
+	 */
+	for (uint64_t i = 0;; i++) {
 		register uint64_t x0 __asm__("x0") = i == 0 ? function : SCM_INTERRUPTED;
 		register uint64_t x1 __asm__("x1") = arguments;
 		register uint64_t x2 __asm__("x2") = first;
@@ -1738,13 +1743,11 @@ scm(const char *what, uint64_t function, uint64_t arguments, uint64_t first, uin
 		    "+r" (x7) : : "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "memory");
 		session = x6;
 		if (x0 != SCM_INTERRUPTED) {
-			printf("adreno: %u: TrustZone returns %d, answer %#llx\n", step, (int32_t)x0, x1);
+			printf("adreno: %u: TrustZone returns %d, answer %#llx (%llu times resumed)\n", step, (int32_t)x0, x1, i);
 			*answer = x1;
 			return (int32_t)x0;
 		}
 	}
-	printf("adreno: %u: TrustZone keeps saying the call was interrupted\n", step);
-	return -1;
 }
 
 static bool
