@@ -1,2 +1,13 @@
 #!/bin/sh
-exec /opt/local/bin/gtimeout "$@"
+# GNU timeout for xl on a Mac: MacPorts' gtimeout, else Homebrew's (or anyone's) gtimeout, else a GNU timeout elsewhere on PATH
+# (coreutils built into a prefix of one's own). Never this file again; and a clear word if there is none.
+[ -x /opt/local/bin/gtimeout ] && exec /opt/local/bin/gtimeout "$@"
+command -v gtimeout >/dev/null 2>&1 && exec gtimeout "$@"
+here=$(cd "$(dirname "$0")" && pwd)
+IFS=:
+for d in $PATH; do
+	[ "$d" = "$here" ] && continue
+	[ -x "$d/timeout" ] && "$d/timeout" --version 2>/dev/null | grep -q 'GNU coreutils' && exec "$d/timeout" "$@"
+done
+echo "timeout: no GNU timeout (MacPorts: port install coreutils; Homebrew: brew install coreutils)" >&2
+exit 127
