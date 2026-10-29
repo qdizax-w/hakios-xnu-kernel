@@ -615,6 +615,54 @@ static struct block aoss = { "mailbox", 0x0c300000, 0x400 };
 
 static struct block ipcc = { "ipcc", 0x00408000, 0x1000 };
 
+/*
+ * miatoll (SM7125) has no IPCC. A doorbell there is a bit of one register of the APCS global block (dt:
+ * mailbox@17C00000, qcom,atoll-apcs-hmss-global, IPC at 0xc): bit 0 the always-on processor (qcom,qmp-aop's
+ * irq-reg-base and irq-mask), bits 12 and 14 the modem's GLINK and SMP2P (dt: the mboxes of qcom,glink/modem and
+ * qcom,smp2p-modem). The modem's own rings come as interrupts nobody here takes: nothing is heard of them
+ * (heard() is "nobody"), and the steps look at the shared memory for what the modem has done, as they do anyway.
+ */
+#define MIATOLL_SOC_BASE        0x00100000ul
+#define APCS_IPC                0x0c
+static struct block apcs = { "apcs", 0x17c00000, 0x1000 };
+static bool bells_apcs;                 /* miatoll: set where the SoC base is checked */
+
+static void
+ring(uint32_t whom)
+{
+	if (bells_apcs) {
+		unsigned bit = whom >> 16 == IPCC_AOP ? 0 : (whom & 0xffff) == IPCC_GLINK ? 12 : 14;
+
+		wr(apcs.base + APCS_IPC, 1u << bit);
+	} else {
+		wr(ipcc.base + IPCC_SEND, whom);
+	}
+}
+
+static void need(struct block *b);
+static void put(struct block *b, const char *name, uint32_t offset, uint32_t value);
+
+static void
+need_bells(void)
+{
+	need(bells_apcs ? &apcs : &ipcc);
+}
+
+static uint32_t
+heard(void)
+{
+	return bells_apcs ? IPCC_NOBODY : rd(ipcc.base + IPCC_RECEIVED);
+}
+
+/* IPCC's enabling, disabling and clearing of a signal: there is nothing of the kind with the APCS register */
+static void
+bell_set(const char *name, uint32_t offset, uint32_t value)
+{
+	if (!bells_apcs) {
+		put(&ipcc, name, offset, value);
+	}
+}
+
 static struct {
 	uint32_t glink, smp2p, said;
 	uint64_t since;
@@ -629,7 +677,7 @@ static void
 doorbells(void)
 {
 	for (unsigned i = 0; i < 8; i++) {
-		uint32_t who = rd(ipcc.base + IPCC_RECEIVED);
+		uint32_t who = heard();
 
 		if (who == IPCC_NOBODY || who >> 16 != IPCC_MPSS) {
 			return;
@@ -664,7 +712,7 @@ mailbox_wait(uint32_t offset, uint32_t value, uint32_t ms)
 static void
 ring_aop(void)
 {
-	wr(ipcc.base + IPCC_SEND, IPCC_AOP << 16 | 0);
+	ring(IPCC_AOP << 16 | 0);
 }
 
 /* Linux's qmp_open(), as hakios.wifi.c does it; what is done already is found done. Under the mailbox's lock. */
@@ -674,7 +722,7 @@ mailbox_open(void)
 	uint32_t box, size;
 
 	need(&aoss);
-	need(&ipcc);
+	need_bells();
 	if (get(&aoss, "magic", QMP_MAGIC) != QMP_MAGIC_VALUE || get(&aoss, "version", QMP_VERSION) != 1) {
 		printf("mpss: %u: not a mailbox this knows\n", step);
 		return false;
@@ -826,6 +874,18 @@ rail_position(const char *name, uint32_t level, uint32_t *address)
 	char id[8] = { 0 };
 
 	if (cmd_db == NULL) {
+		if (bells_apcs) {
+			/* miatoll: the boot loader leaves the database's address in the AOP's message RAM (dt: qcom,cmd-db@c3f000c) */
+			vm_offset_t at = ml_io_map(0x0c3f0000, 0x1000);
+			uint64_t where = rd(at + 0xc) | (uint64_t)rd(at + 0x10) << 32;
+
+			ml_io_unmap(at, 0x1000);
+			printf("mpss: %u: the command database is at %#llx (the AOP says)\n", step, where);
+			if (where == 0 || where >> 32) {
+				return -1;
+			}
+			cmd_db_phys = (uint32_t)where;
+		}
 		cmd_db = (const struct cmd_db_header *)ml_io_map_unmappable(cmd_db_phys, CMD_DB_SIZE, VM_WIMG_WCOMB);
 	}
 	if (!(cmd_db->magic[0] == 0xdb && cmd_db->magic[1] == 0x30 && cmd_db->magic[2] == 0x03 && cmd_db->magic[3] == 0x0c)) {
@@ -1037,8 +1097,8 @@ step_survey(void)
 	    smem_item(ITEM_SMP2P_OURS, &size) ? "there" : "not there", smem_item(478, &size) ? "there" : "NOT THERE",
 	    smem_item(479, &size) ? "there" : "NOT THERE", smem_item(480, &size) ? "there" : "not there (the DSP makes it)");
 	show_crash_reason();
-	need(&ipcc);
-	printf("mpss: %u: the doorbells say %#x\n", step, rd(ipcc.base + IPCC_RECEIVED));
+	need_bells();
+	printf("mpss: %u: the doorbells say %#x\n", step, heard());
 	return smem_partition(SMEM_US, SMEM_MPSS, &size, &size) != 0;
 }
 
@@ -1046,7 +1106,8 @@ step_survey(void)
 
 #define MPSS_MEMORY_DEFAULT     0x8b800000u   /* dt: reserved-memory mpss@..., memory-region of qcom,mss */
 static uint32_t mpss_memory = MPSS_MEMORY_DEFAULT;
-#define MPSS_MEMORY_SIZE        0x0f600000u
+#define MPSS_MEMORY_SIZE_DEFAULT 0x0f600000u
+static uint32_t mpss_memory_size = MPSS_MEMORY_SIZE_DEFAULT;
 #define PAS_MPSS_DEFAULT        4               /* dt: qcom,pas-id of qcom,mss */
 static uint32_t pas_mpss = PAS_MPSS_DEFAULT;
 
@@ -1077,7 +1138,7 @@ root_file(const char *name, uint64_t *size)
 	VATTR_INIT(&attributes);
 	VATTR_WANTED(&attributes, va_data_size);
 	if (vnode_getattr(vnode, &attributes, context) != 0 || attributes.va_data_size == 0 ||
-	    attributes.va_data_size > MPSS_MEMORY_SIZE) {
+	    attributes.va_data_size > mpss_memory_size) {
 		vnode_put(vnode);
 		return NULL;
 	}
@@ -1205,7 +1266,7 @@ step_firmware(void)
 			continue;
 		}
 		if (segment.paddr < mpss_memory || segment.file_size > segment.memory_size ||
-		    (uint64_t)segment.paddr + segment.memory_size > (uint64_t)mpss_memory + MPSS_MEMORY_SIZE) {
+		    (uint64_t)segment.paddr + segment.memory_size > (uint64_t)mpss_memory + mpss_memory_size) {
 			printf("mpss: %u: segment %u (%#x, %#x bytes) is not within the DSP's memory\n", step, i, segment.paddr,
 			    segment.memory_size);
 			goto fail;
@@ -1243,7 +1304,7 @@ step_firmware(void)
 	image.size = ((highest + 0xfff) & ~0xfffu) - mpss_memory;
 	printf("mpss: %u: the image is whole (%s): a header of %llu bytes (%u of hashes), %u segments, %llu bytes of files, %#x "
 	    "bytes of the DSP's %#x from %#x\n", step, from_root ? "from /fw on the root" : "from the small image", size, hashes,
-	    image.segments, files, image.size, MPSS_MEMORY_SIZE, mpss_memory);
+	    image.segments, files, image.size, mpss_memory_size, mpss_memory);
 	announce("read the modem's four file systems from the phone's storage into memory of ours (rmtfs below)");
 	{
 		unsigned loaded = rmtfs_load();
@@ -1363,7 +1424,7 @@ dsp_listen(const struct smp2p *theirs)
 		    step, theirs->flags, smp2p_restart_acked);
 		smem_poke(our_item + SMP2P_AT_FLAGS, (ours.flags & ~SMP2P_RESTART_ACK) | (smp2p_restart_acked ? SMP2P_RESTART_ACK : 0));
 		settle();
-		wr(ipcc.base + IPCC_SEND, IPCC_MPSS << 16 | IPCC_SMP2P);
+		ring(IPCC_MPSS << 16 | IPCC_SMP2P);
 	}
 }
 
@@ -1394,14 +1455,14 @@ dsp_ask_to_stop(uint32_t bound_ms)
 		printf("mpss: %u: the DSP is not asked to stop first: its entry says %#x, not \"up\"\n", step, state);
 		return false;
 	}
-	need(&ipcc);
+	need_bells();
 	value_at = at + SMP2P_AT_VALUE((uint32_t)entry);
 	printf("mpss: %u: about to ask the DSP to stop: bit 0 of our entry \"%s\" at %#lx, and its SMP2P doorbell\n", step,
 	    OUR_ENTRY_STOP, smem_phys + value_at);
 	snprintf(last_write, sizeof(last_write), "step %u asked the modem to stop", step);
 	smem_poke(value_at, ours.entry[entry].value | DSP_STOP);
 	settle();
-	wr(ipcc.base + IPCC_SEND, IPCC_MPSS << 16 | IPCC_SMP2P);
+	ring(IPCC_MPSS << 16 | IPCC_SMP2P);
 	asked = now = now_us();
 	while (now - asked < bound_ms * 1000ull) {
 		if (dsp_words(&theirs) && (dsp_state(&theirs) & (DSP_STOP_ACK | DSP_FATAL))) {
@@ -1416,7 +1477,7 @@ dsp_ask_to_stop(uint32_t bound_ms)
 	    (now - asked) % 1000, state);
 	smem_poke(value_at, ours.entry[entry].value & ~DSP_STOP);
 	settle();
-	wr(ipcc.base + IPCC_SEND, IPCC_MPSS << 16 | IPCC_SMP2P);
+	ring(IPCC_MPSS << 16 | IPCC_SMP2P);
 	return (state & DSP_STOP_ACK) != 0;
 }
 
@@ -1448,8 +1509,10 @@ dsp_shutdown(const char *why)
 	if (!leaving) {
 		rmtfs_share(false);
 	}
-	need(&ipcc);
-	wr(ipcc.base + IPCC_DISABLE, IPCC_MPSS << 16 | IPCC_SMP2P);
+	need_bells();
+	if (!bells_apcs) {
+		wr(ipcc.base + IPCC_DISABLE, IPCC_MPSS << 16 | IPCC_SMP2P);
+	}
 	doorbells();
 	dsp_started = false;
 	mailbox_send("{class: image, res: load_state, name: modem, val: off}");
@@ -1506,12 +1569,12 @@ step_header(void)
 	printf("mpss: %u: TRUSTZONE ACCEPTS THE MODEM'S SIGNATURE FROM THIS KERNEL\n", step);
 
 	announce("tell TrustZone where the image will be: the whole of the modem's memory, as Linux does");
-	result = scm("where the image will be", SCM_PAS_MEM_SETUP, SCM_THREE_VALUES, pas_mpss, mpss_memory, MPSS_MEMORY_SIZE, 0, &answer);
+	result = scm("where the image will be", SCM_PAS_MEM_SETUP, SCM_THREE_VALUES, pas_mpss, mpss_memory, mpss_memory_size, 0, &answer);
 	if (result != 0 || answer != 0) {
 		printf("mpss: %u: TRUSTZONE DOES NOT TAKE THE PLACE: the call returns %d, its answer is %#llx\n", step, result, answer);
 		return false;
 	}
-	printf("mpss: %u: TrustZone takes the place: %#x bytes at %#x (the image takes %#x of them)\n", step, MPSS_MEMORY_SIZE, mpss_memory,
+	printf("mpss: %u: TrustZone takes the place: %#x bytes at %#x (the image takes %#x of them)\n", step, mpss_memory_size, mpss_memory,
 	    image.size);
 	return true;
 }
@@ -1746,8 +1809,8 @@ step_our_item(void)
 	smem_poke(our_item + SMP2P_AT_VERSION, SMP2P_RESTART_ACKS << 8 | SMP2P_VERSION);
 	settle();
 	smp2p_agreed = smp2p_restart_acks = smp2p_restart_acked = false;
-	need(&ipcc);
-	wr(ipcc.base + IPCC_SEND, IPCC_MPSS << 16 | IPCC_SMP2P);
+	need_bells();
+	ring(IPCC_MPSS << 16 | IPCC_SMP2P);
 	if (!smem_peek(our_item, &ours, sizeof(ours)) || ours.magic != SMP2P_MAGIC || smp2p_entry(&ours, OUR_ENTRY_STOP) < 0) {
 		printf("mpss: %u: OUR ITEM DOES NOT READ BACK AS WRITTEN\n", step);
 		return false;
@@ -2429,16 +2492,16 @@ step_start(void)
 	have = dsp_words(&last);
 	announce("listen for the modem's doorbells, ask RPMh for its rails, tell the always-on processor that its image is "
 	    "loaded, and ask TrustZone to authenticate the image and let the DSP out of reset");
-	need(&ipcc);
-	for (unsigned i = 0; i < 8 && (rang = rd(ipcc.base + IPCC_RECEIVED)) != IPCC_NOBODY && rang >> 16 == IPCC_MPSS; i++) {
-		put(&ipcc, "heard", IPCC_CLEAR, rang);
+	need_bells();
+	for (unsigned i = 0; i < 8 && (rang = heard()) != IPCC_NOBODY && rang >> 16 == IPCC_MPSS; i++) {
+		bell_set("heard", IPCC_CLEAR, rang);
 	}
-	put(&ipcc, "listened for", IPCC_ENABLE, IPCC_MPSS << 16 | IPCC_SMP2P);
-	put(&ipcc, "listened for", IPCC_ENABLE, IPCC_MPSS << 16 | IPCC_GLINK);
+	bell_set("listened for", IPCC_ENABLE, IPCC_MPSS << 16 | IPCC_SMP2P);
+	bell_set("listened for", IPCC_ENABLE, IPCC_MPSS << 16 | IPCC_GLINK);
 	bzero(&doorbell, sizeof(doorbell));
 	lck_mtx_lock(&dsp_lock);
 	{
-		uint32_t ipa_fw = 1;
+		uint32_t ipa_fw = bells_apcs ? 0 : 1;      /* miatoll's IPA 4.2 is not the first phone's */
 
 		PE_parse_boot_argn("modem_ipa_fw", &ipa_fw, sizeof(ipa_fw));
 		ipa_loaded = ipa_fw != 0 && ipa_firmware_load();
@@ -2728,7 +2791,7 @@ glink_put(const void *first, uint32_t first_length, const void *second, uint32_t
 	settle();
 	smem_poke(glink.descriptor + GLINK_OUR_HEAD, (head + padded) % glink.ours_size);
 	settle();
-	wr(ipcc.base + IPCC_SEND, IPCC_MPSS << 16 | IPCC_GLINK);
+	ring(IPCC_MPSS << 16 | IPCC_GLINK);
 	glink.said++;
 	return true;
 }
@@ -2959,7 +3022,7 @@ glink_pump(void)
 		}
 		case GLINK_READ_NOTIFY:
 			glink_advance(length);
-			wr(ipcc.base + IPCC_SEND, IPCC_MPSS << 16 | IPCC_GLINK);
+			ring(IPCC_MPSS << 16 | IPCC_GLINK);
 			break;
 		case GLINK_CLOSE:
 			glink_advance(length);
@@ -6351,11 +6414,23 @@ hakios_mpss_init(void)
 	if (last_step == 0 && (!PE_parse_boot_argn("modem", &on, sizeof(on)) || on != 1)) {
 		return;
 	}
-	if (pe_arm_get_soc_base_phys() != HAKIOS_SOC_BASE) {
+	bells_apcs = pe_arm_get_soc_base_phys() == MIATOLL_SOC_BASE;
+	if (pe_arm_get_soc_base_phys() != HAKIOS_SOC_BASE && !bells_apcs) {
 		printf("mpss: modem=1 and modem_step=N are for the phone's modem, and this is not the phone\n");
 		return;
 	}
+	if (bells_apcs) {
+		/*
+		 * miatoll (SM7125): its modem's memory (dt: reserved-memory modem_region@86000000, memory-region of
+		 * qcom,mss@4080000, image 4 as here); the IPA is another one (IPA 4.2), its firmware is not loaded
+		 * (modem_ipa_fw=0 unless asked for). The shared memory, the AOSS mailbox, the RSC and the lock are where
+		 * the first phone has them.
+		 */
+		mpss_memory = 0x86000000u;
+		mpss_memory_size = 0x08400000u;
+	}
 	soc_override();
+	PE_parse_boot_argn("soc_mpss_size", &mpss_memory_size, sizeof(mpss_memory_size));
 	if (last_step == 0) {
 		/* all of it, on a thread of its own, and left up */
 		last_step = STEPS;
