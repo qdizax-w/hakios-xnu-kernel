@@ -14,3 +14,6 @@
 # a shell over the network (usbnet=1: `ssh root@10.42.0.100`), with the key in ssh/authorized_keys alone
 # (userland/build.sh puts it on the data volume; no key there, no way in): see rc.jobs.ssh
 /var/jb/usr/sbin/sshd -D -e -h /var/root/.ssh/ssh_host_ed25519_key -o UsePAM=no -o PasswordAuthentication=no -o PermitRootLogin=prohibit-password -o AuthorizedKeysFile=/var/root/.ssh/authorized_keys &
+# the extensions iOS runs on its own -- widgets above all -- at the background policy: they render on the CPU here and
+# took the home screen's time (widgets-background.sh)
+/var/jb/bin/sh /redwood/bin/widgets-background.sh &

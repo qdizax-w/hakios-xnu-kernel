@@ -162,6 +162,8 @@ cp obj/child root/bin/child
 # ends: the program and its job together, away from the iOS job list below, which several working
 # copies are editing at once.
 [ -f obj/var_store ] && cp obj/var_store root/bin/
+# the extensions iOS runs on its own (widgets above all) kept at the background policy (rc.jobs.unlock starts it)
+install -m 0755 widgets-background.sh root/bin/
 cp com.hakios.varstore.plist root/LaunchDaemons/
 echo "Darwin on hakios: image built $(date '+%Y-%m-%d %H:%M')" > root/etc/motd
 # 300000 bytes, byte i = (i*31 + (i>>8)) & 0xff; init verifies it through read() and mmap()

@@ -1633,37 +1633,53 @@ segment_check(volatile uint8_t *dsp_memory, unsigned s)
 	return wrong;
 }
 
+/*
+ * Each segment through a mapping of its own pages, not the whole of the modem's memory at once: on miatoll the
+ * memory is 132 MB, and the phone stopped (all of it, at once) while the image went into one mapping of it, the
+ * second time the modem was started (29 October). The first word of each segment is said before it is written,
+ * aloud with modem_pause, so that the log read over the cable shows the last thing tried.
+ */
 static bool
 step_image(void)
 {
-	volatile uint8_t *dsp_memory;
 	uint64_t written = 0, cleared = 0, wrong = 0, began;
 
 	if (image.segments == 0) {
 		return false;
 	}
-	announce("put the image's segments into the modem's memory (0x8b800000, 246 MB: memory of nobody's until TrustZone starts "
-	    "the modem), with zeroes where a segment is longer than its file, and read them back");
-	dsp_memory = (volatile uint8_t *)ml_io_map_unmappable(mpss_memory, image.size, VM_WIMG_WCOMB);
-	if (dsp_memory == NULL) {
-		printf("mpss: %u: the modem's memory cannot be mapped (%#x bytes)\n", step, image.size);
-		return false;
-	}
+	announce("put the image's segments into the modem's memory (memory of nobody's until TrustZone starts the modem), each "
+	    "through a mapping of its own, with zeroes where a segment is longer than its file, and read them back");
 	snprintf(last_write, sizeof(last_write), "step %u wrote the image at %#x", step, mpss_memory);
 	began = now_us();
 	for (unsigned s = 0; s < image.segments; s++) {
-		segment_put(dsp_memory, s);
+		uint32_t at = image.segment[s].at, first = at & ~0x3fffu, size = image.segment[s].memory_size;
+		uint32_t span = ((at + size + 0x3fffu) & ~0x3fffu) - first;
+		volatile uint8_t *window = (volatile uint8_t *)ml_io_map_unmappable(mpss_memory + first, span, VM_WIMG_WCOMB);
+		uint64_t bad;
+
+		if (window == NULL) {
+			printf("mpss: %u: segment %u: %#x bytes at %#x cannot be mapped\n", step, s, span, mpss_memory + first);
+			return false;
+		}
+		if (s == 0 || s + 1 == image.segments || pause_ms != 0) {
+			tell("mpss: %u: segment %u of %u: %#x bytes at %#x (%#x of them from the file), about to be written\n", step, s,
+			    image.segments, size, mpss_memory + at, image.segment[s].file_size);
+			hold();
+		}
+		/* (segment_put() and segment_check() write at `at' from their base: the window begins `first' into the memory) */
+		segment_put(window - first, s);
+		settle();
+		bad = segment_check(window - first, s);
+		wrong += bad;
 		written += image.segment[s].file_size;
-		cleared += image.segment[s].memory_size - image.segment[s].file_size;
-	}
-	settle();
-	for (unsigned s = 0; s < image.segments; s++) {
-		wrong += segment_check(dsp_memory, s);
+		cleared += size - image.segment[s].file_size;
+		ml_io_unmap((vm_offset_t)window, span);
+		if (bad != 0) {
+			printf("mpss: %u: segment %u reads back differently in %llu words or bytes\n", step, s, bad);
+		}
 	}
 	printf("mpss: %u: %u segments, %llu bytes written and %llu cleared in %llu ms; read back, %llu words or bytes differ\n", step,
 	    image.segments, written, cleared, (now_us() - began) / 1000, wrong);
-	settle();
-	ml_io_unmap((vm_offset_t)dsp_memory, image.size);
 	image_written = wrong == 0;
 	image_forget();                         /* (it is in the modem's memory now: what was read of the root, given back) */
 	return image_written;
