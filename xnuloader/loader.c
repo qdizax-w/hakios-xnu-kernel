@@ -15,10 +15,13 @@
 /* ------------------------------------------------------------------------ */
 /* Fixed conventions shared with the boot shim, the packer and the kernel   */
 
-#define PAYLOAD_BASE        0xF0000000ULL
+#define PAYLOAD_BASE_DEFAULT 0xF0000000ULL       /* where it is unless the platform says otherwise (payload_base) */
 #define PAYLOAD_MAGIC       0x50554E58u /* "XNUP" */
 
 struct payload_header { uint32_t magic; uint32_t size; };
+
+/* where the boot shim put the payload: the "XNU Payload" region of the UEFI port's memory map */
+static uint64_t payload_base = PAYLOAD_BASE_DEFAULT;
 struct payload_entry { char name[16]; uint32_t size; uint32_t reserved; };
 
 #define KERNEL_VIRT_BASE    0xFFFFFFF004000000ULL /* boot_args.virtBase */
@@ -38,7 +41,7 @@ struct payload_entry { char name[16]; uint32_t size; uint32_t reserved; };
 #define CHECKPOINT_SELFTEST 999
 #define PANIC_LOG_SIZE      0x80000u
 #define NVRAM_BANK_SIZE     0x2000u
-#define PANIC_LOG_BASE      (PAYLOAD_BASE + PAYLOAD_MAX_SIZE - 0x100000ULL)
+#define PANIC_LOG_BASE      (payload_base + PAYLOAD_MAX_SIZE - 0x100000ULL)
 #define PAYLOAD_MAX_SIZE    0x04000000ULL         /* RAM reserved for the payload in the UEFI memory map */
 
 /* ------------------------------------------------------------------------ */
@@ -161,6 +164,29 @@ str_eq(const char *a, const char *b)
 		a++, b++;
 	}
 	return *a == *b;
+}
+
+/* Is `word` one of the space-separated words of `line`? */
+static int
+has_word(const char *line, const char *word)
+{
+	while (*line) {
+		const char *a = line, *b = word;
+
+		while (*a && *a != ' ' && *a == *b) {
+			a++, b++;
+		}
+		if (*b == 0 && (*a == 0 || *a == ' ')) {
+			return 1;
+		}
+		while (*line && *line != ' ') {
+			line++;
+		}
+		while (*line == ' ') {
+			line++;
+		}
+	}
+	return 0;
 }
 
 /*
@@ -542,6 +568,26 @@ dt_end(struct dt_writer *w)
 /* ------------------------------------------------------------------------ */
 /* Platform description                                                     */
 
+/* The port's partition, darwin, as it was set up on a phone: what a write into it is checked against. */
+struct darwin_id {
+	uint64_t first, last;           /* its first and last LBA on logical unit 0 (blocks of 4096) */
+	efi_guid type, unique;
+};
+
+/* redwood's: entry 34, Apple's APFS type */
+static const struct darwin_id darwin_redwood = {
+	.first = 25374720ULL, .last = 30617594ULL,
+	.type = { 0x7c3457ef, 0x0000, 0x11aa, { 0xaa, 0x11, 0x00, 0x30, 0x65, 0x43, 0xec, 0xac } },
+	.unique = { 0xfd6854ad, 0x24aa, 0x4fc3, { 0x94, 0xfe, 0x29, 0x01, 0x16, 0x85, 0x8d, 0x68 } },
+};
+
+/* miatoll's (the Redmi Note 9S it was made on): entry 19, the end of what was userdata, parted's "Linux data" type */
+static const struct darwin_id darwin_miatoll = {
+	.first = 9256960ULL, .last = 14499834ULL,
+	.type = { 0x0fc63daf, 0x8483, 0x4772, { 0x8e, 0x79, 0x3d, 0x69, 0xd8, 0x47, 0x7d, 0xe4 } },
+	.unique = { 0xded36df0, 0x2641, 0x4a00, { 0xb5, 0x25, 0x2f, 0x88, 0x0b, 0xaf, 0x96, 0xc5 } },
+};
+
 struct platform {
 	const char *name;
 	uint64_t io_base, io_size;       /* one window covering the SoC peripherals */
@@ -553,6 +599,32 @@ struct platform {
 	int core_shift;                  /* ... in this bit of MPIDR: the phone numbers them in the second affinity field */
 	uint32_t timeout_scale;          /* a kernel on several cores gets this much longer to wait for a lock, 0: as it is */
 	uint32_t small_cores;            /* a bit for each of the slower cores, by number: "small-core" in the device tree */
+	uint64_t fb_base;                /* the framebuffer the firmware reports (GOP): it tells this device apart */
+	const char *const *drop_args;    /* boot-args the loader leaves out of the kernel's (see run_kernel), NULL: none */
+	uint64_t payload_base;           /* the payload's address (mkxnuimg.py's PAYLOAD_BASE), 0: the default */
+	const char *serial;              /* the serial number iOS shows (Settings, About), NULL: redwood's */
+	uint64_t usb_keep_below;         /* the USB driver's buffers must stay below this (its window above), 0: anywhere */
+	uint32_t vtimer_intid;           /* the EL1 virtual timer's GIC interrupt (gic node "vtimer-intid"), 0: the kernel's 27 */
+	const struct darwin_id *darwin;  /* the port's own partition on this phone, as its GPT has it; NULL: none */
+};
+
+/*
+ * The boot-args that start one of the kernel's phone drivers (bsd/dev/redwood_*.c) which writes to
+ * the POCO X5 Pro's own addresses -- its pins, PMICs, clocks, serial engines, UFS host -- with no
+ * other check. Wi-Fi (wifi=), the audio DSP (adsp=), gpu= and adreno= are not here: those drivers
+ * check the SoC base themselves (adreno= runs on miatoll as far as its steps have been ported to it),
+ * and another phone's description has a different io_base. display_probe= is, because it goes past
+ * that check.
+ */
+static const char *const redwood_driver_args[] = {
+	"touchscreen", "buttons", "cpufreq", "ddr", "battery", "haptic", "torch", "cam", "speaker_probe",
+	"display_probe", "ufs_native", NULL
+};
+/* miatoll's: the same, but buttons=, torch= and cpufreq= stay -- those drivers tell the two phones apart by the SoC base
+ * themselves (bsd/dev/redwood_torch.c drives the PM6150L's flash module here, redwood_cpufreq.c its OSM) */
+static const char *const miatoll_driver_args[] = {
+	"touchscreen", "ddr", "battery", "haptic", "cam", "speaker_probe",
+	"display_probe", "ufs_native", NULL
 };
 
 static const struct platform platform_qemu_virt = {
@@ -578,6 +650,44 @@ static const struct platform platform_redwood = {
 	 * (XNU's machine_routines.c, ml_choose_slow_core_partners()).
 	 */
 	.small_cores = 0x0f,
+	.fb_base = 0xE1000000,
+	.darwin = &darwin_redwood,
+};
+
+static const struct platform platform_miatoll = {
+	/*
+	 * Snapdragon 720G (SM7125): Redmi Note 9S / 9 Pro / 9 Pro Max, Note 10 Lite, POCO M2 Pro, under
+	 * Mu-Silicium's miatollPkg. The window starts at the global clock controller (0x00100000), below
+	 * redwood's 0x00400000: the kernel's redwood-only drivers tell the phones apart by that base.
+	 */
+	.name = "miatoll", .io_base = 0x00100000, .io_size = 0x3FF00000, .serial = "MIATOLL9S",
+	.gic_dist = 0x17A00000, .gic_redist = 0x17A60000, .uart = 0, .log_other_cpu = 1,
+	.cores = 8, .core_shift = 8,
+	/* Cores 0-5 are Cortex-A55s, 6-7 Cortex-A76s (capacity-dmips-mhz 1024 against 1740 in the DT) */
+	.small_cores = 0x3f,
+	/* cont_splash_memory in the phone's device tree, "Display Reserved" in miatollPkg's memory map */
+	.fb_base = 0x9C000000,
+	.drop_args = miatoll_driver_args,
+	/*
+	 * Not redwood's 0xF0000000: on a 4 GB phone that splits the only stretch of RAM long enough for
+	 * the kernel and the system image (0xC0000000-0x17E000000). Here it is in the block below it.
+	 */
+	.payload_base = 0xB0000000,
+	/* its USB driver takes the last megabyte below 4 GB for its buffers: kept out of the same stretch */
+	.usb_keep_below = 0xC0000000,
+	/* the virtual timer is PPI 3 here (the DT's arm,armv8-timer: <1 1> <1 2> <1 3> <1 0>), as on SDM845 and SC7180 */
+	.vtimer_intid = 19,
+	.darwin = &darwin_miatoll,
+};
+
+/*
+ * The devices the loader knows, told apart by the framebuffer base their UEFI reports. A port to another
+ * device adds its description here (common/new-device.sh writes a starting point, docs/PORTING.md says
+ * where each value comes from); a display that matches none is QEMU's ramfb.
+ */
+static const struct platform *const platforms[] = {
+	&platform_redwood,
+	&platform_miatoll,
 };
 
 /* ------------------------------------------------------------------------ */
@@ -1515,10 +1625,8 @@ ufs_survey(void)
  * same partition, named the same, of the same size, in the same place, on logical unit 0.
  */
 #define BLOCK_WRITE_FIRST  2042368ULL                  /* darwin's blocks of 4096: past both cryptexes */
-#define BLOCK_DARWIN_FIRST 25374720ULL                 /* its first and last LBA of unit 0, as the GPT has them */
-#define BLOCK_DARWIN_LAST  30617594ULL
-#define BLOCK_DARWIN_TYPE  { 0x7c3457ef, 0x0000, 0x11aa, { 0xaa, 0x11, 0x00, 0x30, 0x65, 0x43, 0xec, 0xac } }
-#define BLOCK_DARWIN_UNIQ  { 0xfd6854ad, 0x24aa, 0x4fc3, { 0x94, 0xfe, 0x29, 0x01, 0x16, 0x85, 0x8d, 0x68 } }
+#define BLOCK_DARWIN_FIRST PLAT->darwin->first         /* its first and last LBA of unit 0, as the GPT has them */
+#define BLOCK_DARWIN_LAST  PLAT->darwin->last
 
 /*
  * The partitions first, then the logical units they are on (BLOCK_PART_UNIT, named unit0, unit1,
@@ -1858,7 +1966,6 @@ block_tables(void)
 static int
 block_is_darwin(const efi_partition_info *info, const efi_block_io *bio, const struct loader_block_part *bp)
 {
-	static const efi_guid type = BLOCK_DARWIN_TYPE, uniq = BLOCK_DARWIN_UNIQ;
 	static const char name[] = "darwin";
 	const char *why = NULL;
 
@@ -1867,9 +1974,11 @@ block_is_darwin(const efi_partition_info *info, const efi_block_io *bio, const s
 			return 0;               /* another partition: nothing to say about it */
 		}
 	}
-	if (memcmp(&info->type_guid, &type, sizeof(type)) != 0) {
+	if (PLAT->darwin == NULL) {
+		why = "this phone has no darwin the port knows";
+	} else if (memcmp(&info->type_guid, &PLAT->darwin->type, sizeof(efi_guid)) != 0) {
 		why = "its type GUID is not the one it had";
-	} else if (memcmp(&info->unique_guid, &uniq, sizeof(uniq)) != 0) {
+	} else if (memcmp(&info->unique_guid, &PLAT->darwin->unique, sizeof(efi_guid)) != 0) {
 		why = "its unique GUID is not the one it had";
 	} else if (info->start_lba != BLOCK_DARWIN_FIRST || info->end_lba != BLOCK_DARWIN_LAST) {
 		why = "it does not begin and end where it did";
@@ -2291,6 +2400,8 @@ run_on_other_cpu(uint64_t mpidr, uint64_t entry, uint64_t boot_args_pa, const st
 	uint64_t daif = 0, group1 = 0, started, last_pet, last_battery, last_beat_at, last_beat = 0, noted = 0;
 	int64_t status;
 	int arrived = 0, watching_only = 0;
+	/* usbnet=1: the kernel takes the USB port for an Ethernet link of its own (redwood_usbnet.c): hands off it */
+	int usb_kernels = has_word(((const struct boot_args *)(uintptr_t)boot_args_pa)->commandLine, "usbnet=1");
 
 	running_live = live;
 	run_active = 1;
@@ -2386,7 +2497,9 @@ run_on_other_cpu(uint64_t mpidr, uint64_t entry, uint64_t boot_args_pa, const st
 		if (block_enabled) {
 			block_poll();
 		}
-		usb_poll_command();
+		if (!usb_kernels) {
+			usb_poll_command();
+		}
 		if (block_enabled) {
 			/*
 			 * The pause is spent looking at the kernel's mailbox: with one look a pass, a
@@ -2475,7 +2588,11 @@ wdt_arm(void)
 	uint64_t ctl = 0, since = 0;
 
 	if (PLAT != &platform_redwood) {
-		return; /* SMC is not routed anywhere useful on QEMU virt */
+		/*
+		 * SMC is not routed anywhere useful on QEMU virt; miatoll's SM7125 runs QHEE, not the Haven
+		 * (Gunyah) hypervisor whose watchdog these calls are, so a hang there needs a hand on the power key.
+		 */
+		return;
 	}
 	uint64_t st = smc_call(VIRT_WDT_STATUS, 0, 0, &ctl, &since);
 	uint64_t r_time = smc_call(VIRT_WDT_SET_TIME, WDT_BITE_MS, WDT_BITE_MS, NULL, NULL);
@@ -2564,12 +2681,12 @@ payload_walk_size(uint32_t header_size)
 static int
 parse_payload(struct payload_info *pi, int verbose)
 {
-	struct payload_header *ph = (struct payload_header *)PAYLOAD_BASE;
+	struct payload_header *ph = (struct payload_header *)payload_base;
 
 	memset(pi, 0, sizeof(*pi));
 	pi->cmdline = "";
 	if (ph->magic != PAYLOAD_MAGIC) {
-		print("no payload at %x (magic %x)\n", PAYLOAD_BASE, (uint64_t)ph->magic);
+		print("no payload at %x (magic %x)\n", payload_base, (uint64_t)ph->magic);
 		return 0;
 	}
 	/*
@@ -2724,6 +2841,31 @@ print_memory_map(void)
 	}
 }
 
+/*
+ * What is not free RAM between 3 and 4 GB: on a 4 GB phone the kernel's window can only grow down
+ * from 4 GB into that range, so whatever the firmware or a driver keeps there limits it.
+ */
+static void
+print_below_4g(const char *when)
+{
+	static uint8_t map_buf[65536];
+	uint64_t map_size = sizeof(map_buf), map_key, desc_size;
+	uint32_t desc_ver;
+
+	if (EFI_ERROR(BS->get_memory_map(&map_size, map_buf, &map_key, &desc_size, &desc_ver))) {
+		return;
+	}
+	print("in use between 0xc0000000 and 4 GB, %s:\n", when);
+	for (uint64_t off = 0; off < map_size; off += desc_size) {
+		efi_memory_descriptor *d = (efi_memory_descriptor *)(map_buf + off);
+		uint64_t end = d->phys_start + (d->pages << 12);
+
+		if (d->type != EfiConventionalMemory && end > 0xC0000000ULL && d->phys_start < 0x100000000ULL) {
+			print("  %x - %x  type %d\n", d->phys_start, end, (uint64_t)d->type);
+		}
+	}
+}
+
 static int
 choose_window(const struct payload_info *pi)
 {
@@ -2731,7 +2873,7 @@ choose_window(const struct payload_info *pi)
 	uint64_t map_size = sizeof(map_buf), map_key, desc_size;
 	uint32_t desc_ver;
 	uint64_t best_base = 0, best_size = 0;
-	uint64_t pay_lo = PAYLOAD_BASE, pay_hi = PAYLOAD_BASE + PAYLOAD_MAX_SIZE;
+	uint64_t pay_lo = payload_base, pay_hi = payload_base + PAYLOAD_MAX_SIZE;
 
 	if (win_size != 0) {
 		return 1;
@@ -2740,12 +2882,46 @@ choose_window(const struct payload_info *pi)
 		print("GetMemoryMap failed\n");
 		return 0;
 	}
+	/* free RAM as ranges, touching ones joined: the firmware may list one stretch as several entries */
+	static uint64_t free_lo[512], free_hi[512];
+	unsigned nfree = 0;
+
 	for (uint64_t off = 0; off < map_size; off += desc_size) {
 		efi_memory_descriptor *d = (efi_memory_descriptor *)(map_buf + off);
+		uint64_t lo = d->phys_start, hi = d->phys_start + (d->pages << 12);
+		unsigned i;
+
 		if (d->type != EfiConventionalMemory) {
 			continue;
 		}
-		uint64_t lo = d->phys_start, hi = d->phys_start + (d->pages << 12);
+		for (i = 0; i < nfree && free_hi[i] != lo && free_lo[i] != hi; i++) {
+		}
+		if (i < nfree) {
+			free_lo[i] = free_lo[i] < lo ? free_lo[i] : lo;
+			free_hi[i] = free_hi[i] > hi ? free_hi[i] : hi;
+		} else if (nfree < sizeof(free_lo) / sizeof(free_lo[0])) {
+			free_lo[nfree] = lo;
+			free_hi[nfree++] = hi;
+		}
+	}
+	/* (an entry can join two ranges found before it: join until nothing changes) */
+	for (int joined = 1; joined;) {
+		joined = 0;
+		for (unsigned i = 0; i < nfree; i++) {
+			for (unsigned j = i + 1; j < nfree; j++) {
+				if (free_hi[i] == free_lo[j] || free_hi[j] == free_lo[i]) {
+					free_lo[i] = free_lo[i] < free_lo[j] ? free_lo[i] : free_lo[j];
+					free_hi[i] = free_hi[i] > free_hi[j] ? free_hi[i] : free_hi[j];
+					free_lo[j] = free_lo[--nfree];
+					free_hi[j] = free_hi[nfree];
+					joined = 1;
+					j--;
+				}
+			}
+		}
+	}
+	for (unsigned i = 0; i < nfree; i++) {
+		uint64_t lo = free_lo[i], hi = free_hi[i];
 		/* the payload sits in RAM that UEFI may consider free: stay clear of it */
 		if (lo < pay_hi && hi > pay_lo) {
 			if (pay_lo - lo > hi - pay_hi && pay_lo > lo) {
@@ -2788,6 +2964,52 @@ choose_window(const struct payload_info *pi)
  */
 static int starts_with(const char *s, const char *prefix);
 
+/*
+ * The payload's boot-args without the ones this device's description drops (struct platform,
+ * drop_args): "touchscreen=1" or a bare "touchscreen" goes, "touch_flip=1" stays. Each one left
+ * out is said in the log, so that a run that asked for one does not quietly lack it.
+ */
+static const char *
+kept_boot_args(const char *cmdline)
+{
+	static char kept[1024];
+	uint32_t n = 0;
+
+	if (PLAT->drop_args == NULL) {
+		return cmdline;
+	}
+	for (const char *c = cmdline; *c;) {
+		const char *end = c;
+		size_t word;
+		int drop = 0;
+
+		while (*end && *end != ' ') {
+			end++;
+		}
+		word = (size_t)(end - c);
+		for (const char *const *a = PLAT->drop_args; *a != NULL && !drop; a++) {
+			size_t len = str_len(*a);
+
+			drop = word >= len && memcmp(c, *a, len) == 0 && (c[len] == '=' || len == word);
+		}
+		if (drop) {
+			print("%s: boot-arg ", PLAT->name);
+			for (const char *d = c; d < end; d++) {
+				put_char(*d);
+			}
+			print(" left out: its driver is written for redwood's addresses\n");
+		} else if (word != 0 && n + word + 1 < sizeof(kept)) {
+			memcpy(kept + n, c, word);
+			n += word;
+			kept[n++] = ' ';
+		}
+		for (c = end; *c == ' '; c++) {
+		}
+	}
+	kept[n > 0 ? n - 1 : 0] = 0;    /* (no blank at the end) */
+	return kept;
+}
+
 static int
 run_kernel(int have_checkpoint, uint64_t checkpoint)
 {
@@ -2800,6 +3022,7 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 		print("no kernel in payload\n");
 		return 0;
 	}
+	pi.cmdline = kept_boot_args(pi.cmdline);
 	if (!have_checkpoint) {
 		checkpoint = pi.checkpoint;
 	}
@@ -3178,8 +3401,21 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	dt_identity(&w, identity_root, sizeof(identity_root) / sizeof(identity_root[0]), identity_root_data);
 	dt_prop_str(&w, "platform-name", "t8015");
 	/* what iBoot takes from the factory configuration of a real phone; fixed size fields */
-	dt_prop_padded(&w, "serial-number", "RDW00POCOX5P", 32);
-	dt_prop_padded(&w, "mlb-serial-number", "RDW00POCOX5PMLB00", 32);
+	{
+		const char *serial = PLAT->serial != NULL ? PLAT->serial : "RDW00POCOX5P";
+		char mlb[32];
+		int n = 0;
+
+		for (; serial[n] != 0 && n < 20; n++) {
+			mlb[n] = serial[n];
+		}
+		for (const char *tail = "MLB00"; *tail != 0; tail++) {
+			mlb[n++] = *tail;
+		}
+		mlb[n] = 0;
+		dt_prop_padded(&w, "serial-number", serial, 32);
+		dt_prop_padded(&w, "mlb-serial-number", mlb, 32);
+	}
 	dt_prop_padded(&w, "model-number", "MQAC2", 32);
 	dt_prop_padded(&w, "region-info", "LL/A", 32);
 	dt_prop_padded(&w, "regulatory-model-number", "A1865", 32);
@@ -3382,6 +3618,9 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	dt_prop_str(&w, "compatible", "arm,gic-v3");
 	uint64_t gic_reg[4] = { plat->gic_dist - plat->io_base, 0x10000, plat->gic_redist - plat->io_base, 0x100000 };
 	dt_prop(&w, "reg", gic_reg, sizeof(gic_reg));
+	if (plat->vtimer_intid != 0) {
+		dt_prop_u32(&w, "vtimer-intid", plat->vtimer_intid);
+	}
 	dt_end(&w);
 	if (plat->uart != 0) {
 		dt_begin(&w, "uart0");
@@ -3608,15 +3847,31 @@ usb_start(void)
 	static usb_device_descriptor_set set;
 	void *event;
 
+	/*
+	 * Where the window must stay whole, hold that RAM while the driver takes its buffers, so that they
+	 * go lower; it is given back below, before any window is chosen.
+	 */
+	uint64_t hold = PLAT->usb_keep_below, hold_pages = 0;
+
+	if (hold != 0 && hold < 0x100000000ULL) {
+		hold_pages = (0x100000000ULL - hold) >> 12;
+		if (EFI_ERROR(BS->allocate_pages(AllocateAddress, EfiLoaderData, hold_pages, &hold))) {
+			print("usb: could not hold %x - 4 GB for the window: the driver's buffers may land there\n", hold);
+			hold_pages = 0;
+		}
+	}
 	/* Ask the platform to bring the controller up in peripheral mode (as the stock fastboot does). */
 	if (!EFI_ERROR(BS->create_event_ex(0x200 /* EVT_NOTIFY_SIGNAL */, 8 /* TPL_CALLBACK */, usb_dummy_notify, NULL,
 	    &init_guid, &event))) {
 		BS->signal_event(event);
 		BS->close_event(event);
 	}
+	int started = 0;
+	efi_status s;
+
 	if (EFI_ERROR(BS->locate_protocol(&usb_guid, NULL, (void **)&USB))) {
 		print("usb: device protocol not found\n");
-		return 0;
+		goto out;
 	}
 	set.device_descriptor = usb_dev_desc;
 	set.descriptors = &cfg;
@@ -3626,18 +3881,23 @@ usb_start(void)
 	set.bos = usb_bos;
 	set.string_count = 5;
 	set.strings = strings;
-	efi_status s = USB->start_ex(&set);
+	s = USB->start_ex(&set);
 	if (EFI_ERROR(s)) {
 		print("usb: start failed %x\n", s);
-		return 0;
+		goto out;
 	}
 	if (EFI_ERROR(USB->allocate_transfer_buffer(USB_CHUNK, (void **)&usb_rx_buf)) ||
 	    EFI_ERROR(USB->allocate_transfer_buffer(USB_CHUNK, (void **)&usb_tx_buf))) {
 		print("usb: no transfer buffers\n");
-		return 0;
+		goto out;
 	}
 	print("usb: started\n");
-	return 1;
+	started = 1;
+out:
+	if (hold_pages != 0) {
+		BS->free_pages(hold, hold_pages);
+	}
+	return started;
 }
 
 /*
@@ -3798,7 +4058,7 @@ fb_command(char *cmd)
 		} else if (starts_with(cmd, "download:")) {
 			uint64_t total = parse_number(cmd + 9, 16), got = 0;
 			uint64_t limit = PAYLOAD_MAX_SIZE - 0x100000;
-			uint8_t *dest = (uint8_t *)PAYLOAD_BASE;
+			uint8_t *dest = (uint8_t *)payload_base;
 			int to_ramdisk = download_to_ramdisk;
 
 			download_to_ramdisk = 0;
@@ -4033,6 +4293,24 @@ fw_cfg_read(void *buf, uint32_t len)
 	}
 }
 
+/* Mu-Silicium (the phones' UEFI) says "Project Silicium" as its vendor; QEMU's EDK II does not */
+static int
+firmware_is_silicium(void)
+{
+	static const char vendor[] = "Project Silicium";
+	const char16 *v = ST->vendor;
+
+	if (v == NULL) {
+		return 0;
+	}
+	for (unsigned i = 0; i < sizeof(vendor); i++) {
+		if (v[i] != (char16)vendor[i]) {
+			return 0;
+		}
+	}
+	return 1;
+}
+
 static void
 ramfb_phone_screen(void)
 {
@@ -4127,7 +4405,7 @@ load_payload_from_volume(void)
 	efi_file *root = NULL, *file = NULL;
 	uint8_t info[512] __attribute__((aligned(8)));
 	uint64_t info_size = sizeof(info), size, done = 0, pages;
-	uint64_t address = PAYLOAD_BASE;
+	uint64_t address = payload_base;
 
 	if (EFI_ERROR(BS->handle_protocol(IMAGE, &image_guid, (void **)&image)) || image == NULL || image->device == NULL ||
 	    EFI_ERROR(BS->handle_protocol(image->device, &fs_guid, (void **)&fs)) || fs == NULL) {
@@ -4165,19 +4443,19 @@ load_payload_from_volume(void)
 	while (done < size) {
 		uint64_t chunk = size - done < 0x100000ULL ? size - done : 0x100000ULL;       /* 1 MiB at a time */
 
-		if (EFI_ERROR(file->read(file, &chunk, (void *)(uintptr_t)(PAYLOAD_BASE + done))) || chunk == 0) {
+		if (EFI_ERROR(file->read(file, &chunk, (void *)(uintptr_t)(payload_base + done))) || chunk == 0) {
 			volume_payload_note = "\\EFI\\hakios\\payload.bin could not be read to its end";
 			/* what was read stays in memory after the pages are given back: without this, the first MiB's XNUP
 			 * header would still be there and a half-read payload would be taken for a whole one */
-			((volatile struct payload_header *)PAYLOAD_BASE)->magic = 0;
-			BS->free_pages(PAYLOAD_BASE, pages);
+			((volatile struct payload_header *)payload_base)->magic = 0;
+			BS->free_pages(payload_base, pages);
 			goto close;
 		}
 		done += chunk;
 	}
-	if (((const struct payload_header *)PAYLOAD_BASE)->magic != PAYLOAD_MAGIC) {
+	if (((const struct payload_header *)payload_base)->magic != PAYLOAD_MAGIC) {
 		volume_payload_note = "\\EFI\\hakios\\payload.bin is not a payload (no XNUP at its start)";
-		BS->free_pages(PAYLOAD_BASE, pages);
+		BS->free_pages(payload_base, pages);
 		goto close;
 	}
 	volume_payload_bytes = size;
@@ -4195,7 +4473,7 @@ close:
 static const char *
 payload_kernel_version(void)
 {
-	const struct payload_header *ph = (const struct payload_header *)PAYLOAD_BASE;
+	const struct payload_header *ph = (const struct payload_header *)payload_base;
 
 	if (ph->magic != PAYLOAD_MAGIC) {
 		return NULL;
@@ -4255,7 +4533,7 @@ efi_main(efi_handle image, efi_system_table *st)
 
 	BS->set_watchdog_timer(0, 0, 0, NULL);
 	/* no payload in memory (nobody put one there): the volume this loader came from may have one, as a UEFI boot loader's does */
-	if (((const struct payload_header *)PAYLOAD_BASE)->magic != PAYLOAD_MAGIC) {
+	if (((const struct payload_header *)payload_base)->magic != PAYLOAD_MAGIC) {
 		load_payload_from_volume();
 	}
 	print("== XNULOADER v3 ==\n");
@@ -4278,20 +4556,36 @@ efi_main(efi_handle image, efi_system_table *st)
 		SCREEN.width = GOP->mode->info->width;
 		SCREEN.height = GOP->mode->info->height;
 		SCREEN.stride = GOP->mode->info->pixels_per_scanline * 4;
-		if (SCREEN.base == 0xE1000000ULL) {
-			PLAT = &platform_redwood;
-		} else {
-			ramfb_phone_screen();
+		for (unsigned i = 0; i < sizeof(platforms) / sizeof(platforms[0]); i++)
+			if (platforms[i]->fb_base == SCREEN.base)
+				PLAT = platforms[i];
+		if (PLAT == &platform_qemu_virt && firmware_is_silicium()) {
+			/*
+			 * A phone this loader has no description of: going on as QEMU would write QEMU's
+			 * fw_cfg registers (on an SM7125 those are the memory controller's) and call PSCI by HVC.
+			 */
+			print("display %d x %d at %x: no platform has this framebuffer; add one (docs/PORTING.md)\n",
+			    (uint64_t)SCREEN.width, (uint64_t)SCREEN.height, SCREEN.base);
+			flush_log();
+			BS->stall(30000000);
+			reboot();
 		}
+		if (PLAT == &platform_qemu_virt)
+			ramfb_phone_screen();
 		print("display %d x %d at %x\n", (uint64_t)SCREEN.width, (uint64_t)SCREEN.height, SCREEN.base);
 	}
 	print("platform %s\n", PLAT->name);
+	if (PLAT->payload_base != 0) {
+		payload_base = PLAT->payload_base;
+	}
 
 	install_exception_hook();
 	wdt_arm();
 
 	int have_payload = parse_payload(&pi, 0);
+	print_below_4g("before USB");
 	if (have_payload && pi.usb_mode && usb_start()) {
+		print_below_4g("with USB");
 		flush_log();
 		usb_command_loop();
 	}
