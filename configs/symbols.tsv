@@ -83,11 +83,14 @@ FB_DIFF	arg	fb_diff	GPU and display	k	MiniIOMobileFramebuffer.cpp	which pixels o
 FB_FILTER	arg	fb_filter	GPU and display	k	MiniIOMobileFramebuffer.cpp	the picture is scaled to the panel nearest neighbour, as it once was
 FB_HZ	arg	fb_hz	GPU and display	k	MiniIOMobileFramebuffer.cpp	
 FB_QUEUE	arg	fb_queue	GPU and display	k	MiniIOMobileFramebuffer.cpp	
+FB_SCAN	arg	fb_scan	User space	k	hakios.display.c	
 FB_THREADS	arg	fb_threads	GPU and display	k	MiniIOMobileFramebuffer.cpp	
 FBHEIGHT	arg	fbheight	GPU and display	k	MiniIOMobileFramebuffer.cpp	
 FBSCALE	arg	fbscale	GPU and display	k	MiniIOMobileFramebuffer.cpp	the same 375 x 812 points drawn at two pixels a point instead of three
+FBSCALE_ARTWORK	arg	fbscale_artwork	GPU and display	k	MiniIOMobileFramebuffer.cpp	with fbscale=N, the artwork's scale left at 3 (see IOMobileFramebuffer::start)
 FBTRACE	arg	fbtrace	GPU and display	k	MiniIOMobileFramebuffer.cpp	log the first N calls of every selector (default 3)
 FBWIDTH	arg	fbwidth	GPU and display	k	MiniIOMobileFramebuffer.cpp	
+FT8756	arg	ft8756	Touch and buttons	k	hakios.buttons.c	
 GAMUT	arg	gamut	Loader	l	loader.c	
 GL	arg	gl	User space	u	inject.c,inject_sb.c	not even with a GPU; gl=1: also without one, by Mesa's software driver (slow; for working on eagl.c in QEMU)
 GLBLIT	arg	glblit	GPU and display	u	eagl.c	the surface's memory, as before
@@ -130,6 +133,7 @@ GPU_LOG	arg	gpu_log	GPU and display	k	hakios.adreno.c
 HAPTIC_EFFECT	arg	haptic_effect	Haptics and torch	k	hakios.haptic.c	
 MACHINE_NAME	arg	machine_name	CPU, memory and boot	k	GenericARMPE.cpp	
 MEMBENCH	arg	membench	CPU, memory and boot	k	hakios.cpufreq.c	
+MEMLIMIT_EXEMPT	arg	memlimit_exempt	CPU, memory and boot	k	(patch)	
 METAL	arg	metal	GPU and display	ku	HakiosMetal.m,MiniIOMobileFramebuffer.cpp	only the program metal_test (userland/src/metal_test.m): the safe level, for seeing what Metal does with the device
 MIC_ADC	arg	mic_adc	Audio and battery	k	hakios.mic.c	
 MIC_INPUT	arg	mic_input	Audio and battery	k	hakios.mic.c	
@@ -241,6 +245,7 @@ UFS_NATIVE_LEAVE	arg	ufs_native_leave	Storage and APFS	k	hakios.ufshc.c
 UFS_NATIVE_SLOTS	arg	ufs_native_slots	Storage and APFS	k	hakios.ufshc.c	
 UFS_NATIVE_SPIN	arg	ufs_native_spin	Storage and APFS	k	hakios.ufshc.c	
 UFS_PROBE	arg	ufs_probe	Loader	l	loader.c	
+USBNET	arg	usbnet	User space	k	hakios.usbnet.c	
 USTACKS	arg	ustacks	Debugging	k	user_exception_trace.c	
 USTACKS_AT	arg	ustacks_at	Debugging	k	user_exception_trace.c	
 USTACKS_COUNT	arg	ustacks_count	Debugging	k	user_exception_trace.c	

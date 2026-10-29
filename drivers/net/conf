@@ -8,3 +8,7 @@ standard bsd/dev/hakios.net.c
 driver VIRTIO_NET
 	file    bsd/dev/hakios.virtio_net.c
 	help    QEMU's virtio network device as the link behind en0 (virtio_net=1). QEMU only
+
+standard bsd/dev/hakios.usbnet.c
+	help    the phone's USB port as a USB Ethernet adapter (CDC-ECM) behind en0 while iOS runs (usbnet=1): internet
+	help    over the cable, the computer sharing its connection. The loader hands the port over and cannot take it back

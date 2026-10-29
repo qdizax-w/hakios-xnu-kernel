@@ -62,6 +62,7 @@ void hakios_net_init(void);            /* the links there are: each looks for it
 /* an Apple80211 request (SIOCGA80211, SIOCSA80211) for the interface of a radio: hakios.apple80211.c */
 errno_t hakios_apple80211_ioctl(u_long command, void *data);
 void hakios_virtio_net_init(void);     /* boot-arg virtio_net=1: QEMU's virtio network device */
+void hakios_usbnet_init(void);         /* boot-arg usbnet=1: the phone's USB port, a USB Ethernet adapter (miatoll) */
 #endif /* KERNEL */
 
 #endif /* _SYS_HAKIOS_NET_H_ */

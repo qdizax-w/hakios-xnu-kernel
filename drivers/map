@@ -24,6 +24,7 @@ storage  bsd/dev/hakios.virtio_blk.c
 
 gpu      bsd/dev/hakios.adreno.c
 gpu      iokit/Kernel/hakios.gpu.cpp
+gpu      bsd/dev/hakios.display.c
 
 camera   bsd/dev/hakios.camera.c
 camera   bsd/dev/hakios.torch.c
@@ -57,6 +58,7 @@ modem    bsd/dev/hakios.ipa.c
 
 net      bsd/dev/hakios.net.c
 net      bsd/dev/hakios.virtio_net.c
+net      bsd/dev/hakios.usbnet.c
 
 core     bsd/dev/hakios.version.c
 core     bsd/dev/hakios.platform.c

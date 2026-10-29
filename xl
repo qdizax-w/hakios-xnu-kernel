@@ -73,6 +73,11 @@ if [ -n "$DEVICE" ]; then
 	# shellcheck disable=SC1090
 	. "devices/$DEVICE/boot.conf"
 	export UEFI_TARGET UEFI_FD DTB FD_BASE FD_SIZE PAYLOAD_BASE MU_SILICIUM
+	# the kernel's arguments: the device's configuration (configs/<name>_defconfig, tools/hakios-config.py), then the ones its own
+	# drivers read that the catalogue cannot name (boot.conf's DEVICE_ARGS); a profile that sets BOOTARGS itself keeps them
+	if [ -z "$BOOTARGS" ] && [ -f "devices/$DEVICE/configs/${DEVICE}_defconfig" ]; then
+		BOOTARGS="$(python3 tools/hakios-config.py args --defconfig "$DEVICE" 2>/dev/null | tail -1)${DEVICE_ARGS:+ $DEVICE_ARGS}"
+	fi
 	# KERNEL=: a kernel of the profile's own instead of the one built here or prebuilt/
 	[ -n "$KERNEL" ] && K=$KERNEL
 fi
@@ -337,7 +342,7 @@ PY
 }
 
 ios() {
-	[ -n "$IOS_ARGS" ] || { echo "xl: the profile ${DEVICE:-redwood} has no IOS_ARGS"; return 1; }
+	[ -n "$IOS_ARGS" ] || [ -n "$BOOTARGS" ] || { echo "xl: the profile ${DEVICE:-redwood} has no IOS_ARGS and no configuration"; return 1; }
 	# the last one's run waits for a loader that is gone (the port was iOS's): it goes first
 	if [ -s logs/ios-run.pid ]; then
 		pkill -P "$(cat logs/ios-run.pid)" 2>/dev/null; kill "$(cat logs/ios-run.pid)" 2>/dev/null

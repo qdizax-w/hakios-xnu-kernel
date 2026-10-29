@@ -41,6 +41,9 @@ void hakios_touch_post(uint32_t type, uint32_t finger, uint32_t x, uint32_t y);
 void hakios_input_init(void);
 void hakios_virtio_input_init(void);   /* boot-arg virtio_input=1: QEMU's virtio pointer and keyboard */
 void hakios_goodix_init(void);         /* boot-arg touchscreen=1: the phone's Goodix or FocalTech touch screen */
+void hakios_miatoll_touch_init(void);          /* boot-arg ft8756=1: miatoll's FocalTech FT8756 touch screen */
+void hakios_miatoll_battery_init(void);        /* boot-arg qg=1: miatoll's battery, from the PM6150's fuel gauge (bsd/dev/hakios.miatoll_battery.c) */
+void hakios_miatoll_backlight_init(void);      /* boot-arg backlight=N: miatoll's backlight, the PM6150L's WLED (bsd/dev/hakios.miatoll_backlight.c) */
 void hakios_buttons_init(void);        /* boot-arg buttons=1: the phone's power and volume keys */
 void hakios_ufs_init(void);           /* ufs=2 to xnuloader: the phone's storage, read only, through the loader (ufs_shared_pa=) */
 void hakios_ufs_report(const char *when); /* where reading the storage has spent its time so far */

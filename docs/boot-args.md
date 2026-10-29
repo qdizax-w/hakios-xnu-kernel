@@ -2,13 +2,13 @@
 
 Made by `tools/boot-args.py --markdown`; CI fails if it is out of date with the source (`tools/boot-args.py --check`).
 
-Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **319 arguments**: 270 read by the kernel, 14 by the loader, 45 by user space (one is read in more than one place).
+Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **324 arguments**: 275 read by the kernel, 14 by the loader, 45 by user space (one is read in more than one place).
 
 This is a catalogue of what exists and who reads it, not a manual. What an argument means is in the head of the file that reads it. The stable switches have a symbol in the configuration (`tools/hakios-config.py help SYMBOL`, `docs/configs.md`); the rest are the knobs of bring-up (a driver's steps, pauses, traces, test modes) and can change with the driver. Any of them can be given in a configuration with `CONFIG_BOOTARGS="name=value ..."`, which checks that each name is in this list.
 
 Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl kern.bootargs`).
 
-## GPU and display (68)
+## GPU and display (69)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
@@ -33,6 +33,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `fb_threads` | K | `MiniIOMobileFramebuffer.cpp` | `CONFIG_FB_THREADS` |  |
 | `fbheight` | K | `MiniIOMobileFramebuffer.cpp` | `CONFIG_FBHEIGHT` |  |
 | `fbscale` | K | `MiniIOMobileFramebuffer.cpp` | `CONFIG_FBSCALE` |  |
+| `fbscale_artwork` | K | `MiniIOMobileFramebuffer.cpp` | `CONFIG_FBSCALE_ARTWORK` |  |
 | `fbtrace` | K | `MiniIOMobileFramebuffer.cpp` | `CONFIG_FBTRACE` |  |
 | `fbwidth` | K | `MiniIOMobileFramebuffer.cpp` | `CONFIG_FBWIDTH` |  |
 | `glblit` | U | `eagl.c` | `CONFIG_GLBLIT` |  |
@@ -64,7 +65,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `gltrace_shaders` | U | `eagl.c` | `CONFIG_GLTRACE_SHADERS` |  |
 | `gltrace_uniforms` | U | `eagl.c` | `CONFIG_GLTRACE_UNIFORMS` |  |
 | `glwait` | U | `eagl.c` | `CONFIG_GLWAIT` |  |
-| `gpu` | K | `hakios.adreno.c` | `CONFIG_GPU` |  |
+| `gpu` | K | `hakios.adreno.c`, `hakios.cpufreq.c` | `CONFIG_GPU` |  |
 | `gpu_cached` | K | `hakios.gpu.cpp` | `CONFIG_GPU_CACHED` |  |
 | `gpu_exact` | K | `hakios.adreno.c` | `CONFIG_GPU_EXACT` |  |
 | `gpu_keep` | K | `hakios.gpu.cpp` | `CONFIG_GPU_KEEP` |  |
@@ -237,12 +238,13 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `cam_shutter` | K | `hakios.camera.c` | `CONFIG_CAM_SHUTTER` |  |
 | `cam_vblank` | K | `hakios.camera.c` | `CONFIG_CAM_VBLANK` |  |
 
-## Touch and buttons (8)
+## Touch and buttons (9)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
 | `buttons` | K | `hakios.buttons.c` | `CONFIG_BUTTONS` |  |
 | `buttons_steps` | K | `hakios.buttons.c` | `CONFIG_BUTTONS_STEPS` |  |
+| `ft8756` | K | `hakios.buttons.c` | `CONFIG_FT8756` |  |
 | `touch_flip` | K | `hakios.goodix.c` | `CONFIG_TOUCH_FLIP` |  |
 | `touch_poll_us` | K | `hakios.goodix.c` | `CONFIG_TOUCH_POLL_US` |  |
 | `touch_rate` | K | `hakios.goodix.c` | `CONFIG_TOUCH_RATE` |  |
@@ -337,7 +339,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 |---|---|---|---|---|
 | `hakios_kver` | K | `hakios.version.c` |  | the loader (from the payload's kernel.ver) |
 
-## CPU, memory and boot (23)
+## CPU, memory and boot (24)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
@@ -354,6 +356,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `loader_return_after` | KL | `loader.c`, `loader_return.c` |  | xl (XL_SECS) |
 | `machine_name` | K | `GenericARMPE.cpp` | `CONFIG_MACHINE_NAME` |  |
 | `membench` | K | `hakios.cpufreq.c` | `CONFIG_MEMBENCH` |  |
+| `memlimit_exempt` | K | `(patch)` | `CONFIG_MEMLIMIT_EXEMPT` |  |
 | `rd` | KL | `(patch)`, `loader.c` | `CONFIG_RD` |  |
 | `regtrace` | K | `(patch)` | `CONFIG_REGTRACE` |  |
 | `return_cpu` | K | `loader_return.c` | `CONFIG_RETURN_CPU` |  |
@@ -387,7 +390,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `ufs` | L | `loader.c` | `CONFIG_UFS` |  |
 | `ufs_probe` | L | `loader.c` | `CONFIG_UFS_PROBE` |  |
 
-## User space (15)
+## User space (17)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
@@ -397,6 +400,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `ca_vbl` | U | `inject.c` | `CONFIG_CA_VBL` |  |
 | `caenv` | U | `inject.c` | `CONFIG_CAENV` |  |
 | `cc_fade` | U | `inject_sb.c` | `CONFIG_CC_FADE` |  |
+| `fb_scan` | K | `hakios.display.c` | `CONFIG_FB_SCAN` |  |
 | `gl` | U | `inject.c`, `inject_sb.c` | `CONFIG_GL` |  |
 | `glcompile` | U | `inject.c` | `CONFIG_GLCOMPILE` |  |
 | `glno` | U | `inject.c` | `CONFIG_GLNO` |  |
@@ -405,4 +409,5 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `root_apfs` | U | `init.c` | `CONFIG_ROOT_APFS` |  |
 | `sb_delay` | U | `inject_sb.c` |  | xl (XL_SB_DELAY) |
 | `switcher_wallpaper` | U | `inject_sb.c` | `CONFIG_SWITCHER_WALLPAPER` |  |
+| `usbnet` | K | `hakios.usbnet.c` | `CONFIG_USBNET` |  |
 | `var_store` | U | `init.c` | `CONFIG_VAR_STORE` |  |

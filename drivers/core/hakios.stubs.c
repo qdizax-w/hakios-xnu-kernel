@@ -41,6 +41,18 @@ void hakios_virtio_input_init(void) {}
 void hakios_goodix_init(void) {}
 #endif
 
+#ifndef HAKIOS_MIATOLL_TOUCH
+void hakios_miatoll_touch_init(void) {}
+#endif
+
+#ifndef HAKIOS_MIATOLL_BATTERY
+void hakios_miatoll_battery_init(void) {}
+#endif
+
+#ifndef HAKIOS_MIATOLL_BACKLIGHT
+void hakios_miatoll_backlight_init(void) {}
+#endif
+
 #ifndef HAKIOS_BUTTONS
 void hakios_buttons_init(void) {}
 #endif

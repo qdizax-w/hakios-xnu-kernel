@@ -228,6 +228,9 @@ hakios_input_init(void)
 	hakios_cpufreq_init();
 	hakios_virtio_input_init();
 	hakios_goodix_init();
+	hakios_miatoll_touch_init();
+	hakios_miatoll_battery_init();
+	hakios_miatoll_backlight_init();
 	hakios_buttons_init();
 	hakios_battery_init();
 	hakios_ufs_init();

@@ -76,8 +76,21 @@ extern void FlushPoC_DcacheRegion(vm_offset_t va, size_t length);   /* osfmk/arm
  * bounds and the GUIDs of the partition besides (xnuloader/loader.c, BLOCK_WRITE_FIRST).
  */
 #define UFS_WRITE_FIRST    2042368ULL                  /* darwin's blocks of 4096 */
-#define UFS_DARWIN_FIRST   25374720ULL                 /* its first LBA on the unit, as the GPT has it */
-#define UFS_DARWIN_BLOCKS  5242875ULL
+#define UFS_DARWIN_FIRST   ufs_darwin_first()          /* its first LBA on the unit, as the GPT has it */
+#define UFS_DARWIN_BLOCKS  5242875ULL                  /* (on both phones) */
+
+/*
+ * Where darwin begins on each phone: redwood's entry 34; miatoll's entry 19, made on 24 October 2026
+ * from the end of userdata (xnuloader/loader.c, darwin_miatoll; tools/darwin-write.py). The loader
+ * says which phone this is by where its peripherals begin.
+ */
+extern vm_offset_t pe_arm_get_soc_base_phys(void);
+
+static uint64_t
+ufs_darwin_first(void)
+{
+	return pe_arm_get_soc_base_phys() == 0x00100000ul ? 9256960ULL : 25374720ULL;
+}
 
 struct loader_block_part {
 	char name[36];
@@ -186,6 +199,11 @@ static LCK_MTX_DECLARE(ufs_write_mtx, &ufs_lck_grp);
  *                           nothing waited for, so a run without a saver returns as it always did.
  *                           A panic does not come this way at all -- there is no program left to
  *                           ask -- and then the store simply keeps what it had.
+ *                           VAR_SAVE_SOON is the kernel asking for a save without waiting for it:
+ *                           power and volume down held together (bsd/dev/hakios.buttons.c), which on
+ *                           miatoll is the way out of a run -- the phone resets into fastboot a few
+ *                           seconds later, with no way back through the loader. The saver saves and
+ *                           writes VAR_SAVE_IDLE again.
  *   kern.hakios.var_busy   the claim. A write to /dev/rufs_darwin is refused unless the writer
  *                           holds it, so two savers cannot interleave into one slot. It is held by
  *                           process number, and a claimant may take it from a process that is gone
@@ -197,6 +215,7 @@ static LCK_MTX_DECLARE(ufs_write_mtx, &ufs_lck_grp);
 #define VAR_SAVE_IDLE      1
 #define VAR_SAVE_WANTED    2
 #define VAR_SAVE_DONE      3
+#define VAR_SAVE_SOON      4
 #define VAR_SAVE_MS        20000        /* at most this long on the way out (var_save_ms=N) */
 
 static volatile int ufs_var_save = VAR_SAVE_NONE;
@@ -251,7 +270,7 @@ ufs_sysctl_var_save(__unused struct sysctl_oid *oidp, __unused void *arg1, __unu
 }
 
 SYSCTL_PROC(_kern_hakios, OID_AUTO, var_save, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, NULL, 0,
-    ufs_sysctl_var_save, "I", "the data volume's saver: 1 registers, 2 is the kernel asking, 3 is done");
+    ufs_sysctl_var_save, "I", "the data volume's saver: 1 registers, 2 is the kernel asking, 3 is done, 4 is the kernel asking for one now");
 
 /* The claim on the store: 1 takes it, 0 gives it back; reading says which process holds it. */
 static int
@@ -914,13 +933,23 @@ static const struct cdevsw ufs_cdevsw = {
  * so twenty seconds here is well inside both. Nothing else of the way out has happened yet: the
  * GPU, the DSPs and this kernel's transfer list are still as the run had them.
  */
+/* A save now, if a saver is there and is not saving already (bsd/dev/hakios.buttons.c) */
+void
+hakios_var_save_soon(void)
+{
+	if (ufs_ready && ufs_write_part >= 0 && ufs_var_save == VAR_SAVE_IDLE) {
+		ufs_var_save = VAR_SAVE_SOON;
+		printf("var_store: power and volume down held: the data volume is asked for now\n");
+	}
+}
+
 void
 hakios_var_save_on_return(void)
 {
 	uint32_t ms = VAR_SAVE_MS;
 	uint64_t waited = 0;
 
-	if (!ufs_ready || ufs_write_part < 0 || ufs_var_save != VAR_SAVE_IDLE) {
+	if (!ufs_ready || ufs_write_part < 0 || (ufs_var_save != VAR_SAVE_IDLE && ufs_var_save != VAR_SAVE_SOON)) {
 		return;
 	}
 	PE_parse_boot_argn("var_save_ms", &ms, sizeof(ms));

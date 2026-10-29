@@ -847,7 +847,54 @@ index 1750d3a52d3c..0373d0dd160f 100644
  
  	/* Set the swapin trigger in pages based on the maximum size allocated for each c_seg */
  	memorystatus_swapin_trigger_pages = (unsigned int) atop_64(memorystatus_swapin_trigger_segments * c_seg_allocsize);
-@@ -5103,7 +5112,7 @@ memorystatus_pages_update(unsigned int pages_avail)
+@@ -4221,6 +4230,22 @@ memorystatus_idle_exit_from_VM(void)
+  * This is invoked for both advisory, non-fatal per-task high watermarks,
+  * as well as the fatal task memory limits.
+  */
++/* boot-arg memlimit_exempt=NAME (default PosterBoard; "none": nobody): see memorystatus_on_ledger_footprint_exceeded() */
++static boolean_t
++memorystatus_memlimit_exempt(proc_t p)
++{
++	static char name[MAXCOMLEN + 1];
++	static boolean_t read;
++
++	if (!read) {
++		if (!PE_parse_boot_argn("memlimit_exempt", name, sizeof(name))) {
++			strlcpy(name, "PosterBoard", sizeof(name));
++		}
++		read = TRUE;
++	}
++	return *p->p_name && strcmp(name, "none") != 0 && strncmp(name, p->p_name, sizeof(p->p_name)) == 0;
++}
++
+ void
+ memorystatus_on_ledger_footprint_exceeded(boolean_t warning, boolean_t memlimit_is_active, boolean_t memlimit_is_fatal)
+ {
+@@ -4244,6 +4269,23 @@ memorystatus_on_ledger_footprint_exceeded(boolean_t warning, boolean_t memlimit_
+ 	}
+ #endif /* VM_PRESSURE_EVENTS */
+ 
++	if (memlimit_is_fatal && memorystatus_memlimit_exempt(p)) {
++		/*
++		 * (the port's: a process named by boot-arg memlimit_exempt -- PosterBoard when not given -- keeps
++		 * going past its limit, which is lifted; what it had then is said once. RunningBoard gives the
++		 * wallpaper's process an iPhone's limit, and here Mesa and its buffers count against it: killed
++		 * within a second of every start, the wallpaper never appeared.)
++		 */
++		static int said;
++
++		if (said++ < 8) {
++			printf("memorystatus: %s [%d] goes past its limit of %d MB with %llu MB: the limit is lifted (memlimit_exempt)\n",
++			    p->p_name, proc_getpid(p), p->p_memstat_memlimit, get_task_phys_footprint(proc_task(p)) >> 20);
++		}
++		task_set_phys_footprint_limit_internal(proc_task(p), -1, NULL, memlimit_is_active, FALSE);
++		return;
++	}
++
+ 	if (memlimit_is_fatal) {
+ 		/*
+ 		 * If this process has no high watermark or has a fatal task limit, then we have been invoked because the task
+@@ -5103,7 +5145,7 @@ memorystatus_pages_update(unsigned int pages_avail)
  	if (critical || delta) {
  		unsigned int total_pages;
  
@@ -856,7 +903,7 @@ index 1750d3a52d3c..0373d0dd160f 100644
  #if CONFIG_SECLUDED_MEMORY
  		total_pages -= vm_page_secluded_count;
  #endif /* CONFIG_SECLUDED_MEMORY */
-@@ -6609,7 +6618,7 @@ memorystatus_update_levels_locked(boolean_t critical_only)
+@@ -6609,7 +6651,7 @@ memorystatus_update_levels_locked(boolean_t critical_only)
  	}
  
  #if VM_PRESSURE_EVENTS

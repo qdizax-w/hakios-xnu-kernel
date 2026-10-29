@@ -92,11 +92,14 @@ fb_diff	k
 fb_filter	k
 fb_hz	k
 fb_queue	k
+fb_scan	k
 fb_threads	k
 fbheight	k
 fbscale	k
+fbscale_artwork	k
 fbtrace	k
 fbwidth	k
+ft8756	k
 gamut	l
 gl	u
 glblit	u
@@ -144,6 +147,7 @@ hv_wdt_pet	k
 loader_return_after	kl
 machine_name	k
 membench	k
+memlimit_exempt	k
 metal	ku
 mic	k
 mic_adc	k
@@ -272,6 +276,7 @@ ufs_native_spin	k
 ufs_probe	l
 ufs_shared_pa	k
 ufs_write	kl
+usbnet	k
 ustacks	k
 ustacks_at	k
 ustacks_count	k

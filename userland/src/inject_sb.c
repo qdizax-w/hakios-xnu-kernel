@@ -1246,6 +1246,89 @@ load_tweaks(void)
 	}
 }
 
+#include "brightness_hook.h"
+
+static void
+bh_say(const char *format, ...)
+{
+	char line[300];
+	va_list ap;
+
+	va_start(ap, format);
+	vsnprintf(line, sizeof(line), format, ap);
+	va_end(ap);
+	say("%s", line);
+}
+
+/*
+ * The panel's backlight follows iOS's brightness (miatoll: the kernel's bsd/dev/hakios.miatoll_backlight.c, boot-arg
+ * backlight=2, makes /dev/hakios-backlight). What the sliders ask for is caught where they ask
+ * (brightness_hook.h); this is the fallback beside it: the level BackBoardServices keeps, looked at ten times a
+ * second, every change to the kernel as thousandths (with no backlight service backboardd may never change it,
+ * and then this sends only the level at the start). Nothing happens where the device is not there.
+ */
+static void
+backlight_follow(void)
+{
+	float (*current)(void) = (float (*)(void))dlsym(RTLD_DEFAULT, "BKSDisplayBrightnessGetCurrent");
+	int fd = open("/dev/hakios-backlight", O_WRONLY);
+	dispatch_source_t timer;
+	__block uint32_t sent = UINT32_MAX;
+
+	if (fd < 0) {
+		return;
+	}
+	if (current == NULL) {
+		say("hakios: backlight: no BKSDisplayBrightnessGetCurrent: the brightness stays as it is\n");
+		close(fd);
+		return;
+	}
+	timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
+	dispatch_source_set_timer(timer, DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC, 20 * NSEC_PER_MSEC);
+	dispatch_source_set_event_handler(timer, ^{
+		float b = current();
+		uint32_t permille = b <= 0 ? 0 : b >= 1 ? 1000 : (uint32_t)(b * 1000 + 0.5f);
+
+		if (permille != sent && write(fd, &permille, sizeof(permille)) == sizeof(permille)) {
+			if (sent == UINT32_MAX) {
+				say("hakios: backlight: following iOS's brightness, %u of 1000 now\n", permille);
+			}
+			sent = permille;
+		}
+	});
+	dispatch_resume(timer);
+}
+
+/*
+ * The status bar's look at a display scale that is not the iPhone X's (kernel boot-arg fbscale=2): UIKit picks it
+ * by the screen's width in pixels, scale and corner radius, and for 375 points at 2 it has none -- it falls back
+ * to a red bar that says "rdar://45025538" ("No status bar visual provider for screen ..."). UIKit takes an
+ * override from the defaults, UIStatusBarVisualProviderClassName, read by every program that has a status bar:
+ * so it is set in the global domain to the iPhone X's own (_UIStatusBarVisualProvider_Split1125), and taken out
+ * again when the display is at 3, before anything draws a status bar.
+ */
+static void
+status_bar_provider(void)
+{
+	char args[1024] = "";
+	size_t size = sizeof(args) - 1;
+	const char *arg = NULL;
+	bool scaled;
+	CFStringRef key = CFSTR("UIStatusBarVisualProviderClassName");
+
+	if (sysctlbyname("kern.bootargs", args, &size, NULL, 0) == 0) {
+		arg = strstr(args, "fbscale=");
+	}
+	scaled = arg != NULL && (arg == args || arg[-1] == ' ') && arg[8] >= '1' && arg[8] <= '9' && arg[8] != '3';
+	CFPreferencesSetValue(key, scaled ? CFSTR("_UIStatusBarVisualProvider_Split1125") : NULL, kCFPreferencesAnyApplication,
+	    CFSTR("mobile"), kCFPreferencesAnyHost);
+	CFPreferencesSynchronize(kCFPreferencesAnyApplication, CFSTR("mobile"), kCFPreferencesAnyHost);
+	if (scaled) {
+		say("hakios: status bar: the iPhone X's look at display scale %c (%s in the global domain)\n", arg[8],
+		    "UIStatusBarVisualProviderClassName");
+	}
+}
+
 __attribute__((constructor))
 static void
 hakios_springboard_init(void)
@@ -1280,6 +1363,7 @@ hakios_springboard_init(void)
 	 * this one opens it, the way a jailbreak's own hook does.
 	 */
 	load_tweaks();
+	status_bar_provider();                  /* before SpringBoard makes its first status bar */
 	slide = (uintptr_t)_dyld_get_shared_cache_range(&length) - CACHE_BASE;
 	activation = replace_method("SBLockdownManager", "_setupActivationState", 0x1c4bc8dfcUL, (IMP)setup_activation_state);
 	original_set_setup_required_reason = (void (*)(id, SEL, long))replace_method("SBSetupManager",
@@ -1397,6 +1481,8 @@ hakios_springboard_init(void)
 		    sysctl_int("kern.hakios.battery_soc"), sysctl_int("kern.hakios.battery_present"),
 		    sysctl_int("kern.hakios.battery_charger_present"), sysctl_int("kern.hakios.battery_charging"));
 		battery_post_notifications();
+		backlight_follow();
+		bh_install(true);
 	});
 	notify_register_dispatch("com.hakios.unlock", &token, dispatch_get_main_queue(), ^(__unused int t) {
 		unlock();

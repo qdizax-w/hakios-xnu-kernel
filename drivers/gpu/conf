@@ -7,3 +7,8 @@ driver ADRENO
 	file    iokit/Kernel/hakios.gpu.cpp iokitcpp
 	help    the Adreno 642L of the SC7280 woken step by step (adreno=N), and HakiosGPU, the IOKit service Mesa and
 	help    the window server draw through (gpu=1, adreno_keep=1). Needs the GPU's firmware from the phone (fw-gpu/)
+
+standard bsd/dev/hakios.display.c
+	help    where the panel's scan is, for the framebuffer to put each frame on the panel in step with it (fb_scan=1):
+	help    no tearing, the panel's own rate. Reads the display interface's counters; turns on only the two bus clocks
+	help    that reading them needs. Knows redwood's (SC7280) and miatoll's (SM7125) display blocks by the SoC base

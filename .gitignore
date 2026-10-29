@@ -57,6 +57,7 @@ __pycache__/
 !/userland/build.sh
 !/userland/*.py
 !/userland/rc.*
+!/userland/slim.*
 !/userland/com.hakios.*.plist
 !/userland/src/
 !/userland/libmini/

@@ -72,6 +72,44 @@ say(const char *format, ...)
 	write(2, line, (size_t)n);
 }
 
+static void
+say_now(void *line)
+{
+	write(2, line, strlen(line));
+	free(line);
+}
+
+static void
+say_queue(void *queue)
+{
+	*(dispatch_queue_t *)queue = dispatch_queue_create("redwood.input.say", NULL);
+}
+
+/*
+ * The same, for the event server's calls into a service of ours: those are answered on a
+ * deadline, and stderr is the console, where redwood-gl's shaders can stand in line for a
+ * while. A late answer and backboardd takes the touch screen for an accessory it does not
+ * trust ("copy_property:10004003", a send that timed out; "authenticated: NO; builtIn: NO")
+ * and ignores every touch. So the line goes out from a queue of its own.
+ */
+static void
+say_later(const char *format, ...)
+{
+	static dispatch_queue_t queue;
+	static dispatch_once_t once;
+	char *line = malloc(256);
+	va_list ap;
+
+	if (line == NULL) {
+		return;
+	}
+	dispatch_once_f(&once, &queue, say_queue);
+	va_start(ap, format);
+	vsnprintf(line, 256, format, ap);
+	va_end(ap);
+	dispatch_async_f(queue, line, say_now);
+}
+
 /* Replace one entry of a virtual table (unslid address `slot`) that must now hold `expected`. */
 static void *
 replace_virtual(const char *what, uintptr_t slot, uintptr_t expected, void *replacement)
@@ -677,7 +715,7 @@ service_copy_property(__unused void *target, void *refcon, __unused IOHIDService
 
 		CFSetAddValue(asked, key);
 		CFStringGetCString(key, name, sizeof(name), kCFStringEncodingUTF8);
-		say("hakios: input: the event server asks for property \"%s\", which we do not have\n", name);
+		say_later("hakios: input: the event server asks for property \"%s\", which we do not have\n", name);
 	}
 	return value ? CFRetain(value) : NULL;
 }
@@ -712,7 +750,7 @@ service_set_property(__unused void *target, void *refcon, __unused IOHIDServiceC
 
 		CFNumberGetValue(value, kCFNumberIntType, &mode);
 		if (mode != touch_mode) {
-			say("hakios: input: touch detection mode %#x\n", mode);
+			say_later("hakios: input: touch detection mode %#x\n", mode);
 		}
 		touch_mode = mode;
 	}
@@ -727,7 +765,7 @@ service_set_property(__unused void *target, void *refcon, __unused IOHIDServiceC
 			CFStringGetCString(description, text, sizeof(text), kCFStringEncodingUTF8);
 			CFRelease(description);
 		}
-		say("hakios: input: the event server sets \"%s\" = %s\n", name, text);
+		say_later("hakios: input: the event server sets \"%s\" = %s\n", name, text);
 	}
 	return true;
 }

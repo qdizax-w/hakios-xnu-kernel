@@ -259,6 +259,20 @@ load_the_tweaks(void)
 	}
 }
 
+#include "brightness_hook.h"
+
+static void
+bh_say(const char *format, ...)
+{
+	char line[300];
+	va_list ap;
+
+	va_start(ap, format);
+	vsnprintf(line, sizeof(line), format, ap);
+	va_end(ap);
+	say("%s", line);
+}
+
 __attribute__((constructor))
 static void
 hakios_tweaks_init(void)
@@ -270,4 +284,5 @@ hakios_tweaks_init(void)
 	}
 	done = true;
 	load_the_tweaks();
+	bh_install(false);
 }

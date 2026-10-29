@@ -111,6 +111,53 @@ raise_domain(uint32_t domain, uint32_t cores)
 }
 
 /*
+ * Miatoll (SM7125, "atoll"): not EPSS but the older OSM, the same idea (dt: qcom,cpucc@18321000,
+ * "qcom,clk-cpu-osm-atoll"; MiCode curtana-q-oss drivers/clk/qcom/clk-cpu-osm.c). Two groups of cores: the
+ * six Cortex-A55s ("pwrcl", 0x18323000) and the two Cortex-A76s ("perfcl", 0x18325800), a table of rows of
+ * 32 bytes at 0x110 ([31:30] the clock source, 0 a fixed 300 MHz; [7:0] the multiple of 19.2 MHz), ending
+ * where a row repeats the one before; the row wanted written to the group's first core's DCVS_PERF_STATE_DESIRED
+ * (0x920), as osm_set_index() does for a cpufreq policy, and the hardware moves clock and voltage itself. Its
+ * thermal limits (the LMh blocks, qcom,limits-dcvs) stay the hardware's, whatever row is asked for.
+ */
+#define OSM_PWRCL_PHYS          0x18323000UL
+#define OSM_PERFCL_PHYS         0x18325800UL
+#define OSM_SIZE                0x1400UL
+#define OSM_ENABLE              0x000           /* [0]: OSM runs this group */
+#define OSM_FREQ_TABLE          0x110
+#define OSM_ROW_SIZE            32
+#define OSM_TABLE_ROWS          40
+#define OSM_PERF_STATE          0x920           /* DCVS_PERF_STATE_DESIRED_REG(0) */
+
+static void
+raise_osm_group(const char *name, vm_offset_t phys, uint32_t cores)
+{
+	uint32_t top = 0, top_khz = 0, was, now;
+	vm_offset_t base = ml_io_map(phys, OSM_SIZE);
+
+	if ((*(volatile uint32_t *)(base + OSM_ENABLE) & 1) == 0) {
+		tell("cpufreq: the %s group's OSM is not enabled: left as it is\n", name);
+		return;
+	}
+	for (uint32_t row = 0; row < OSM_TABLE_ROWS; row++) {
+		uint32_t entry = *(volatile uint32_t *)(base + OSM_FREQ_TABLE + OSM_ROW_SIZE * row);
+		uint32_t khz = (entry >> 30) ? XO_KHZ * (entry & 0xff) : ALTERNATE_KHZ;
+
+		if (row > 0 && khz <= top_khz) {
+			break;                  /* the table ends by repeating its last row */
+		}
+		top = row;
+		top_khz = khz;
+	}
+	was = *(volatile uint32_t *)(base + OSM_PERF_STATE);
+	*(volatile uint32_t *)(base + OSM_PERF_STATE) = top;
+	__builtin_arm_dsb(0xf);
+	delay_for_interval(20, NSEC_PER_MSEC);
+	now = *(volatile uint32_t *)(base + OSM_PERF_STATE);
+	tell("cpufreq: the %s group (%u of our cores): row %u -> %u of the frequency table, %u MHz%s\n", name, cores, was, top,
+	    top_khz / 1000, now == top ? "" : " (BUT IT READS BACK OTHERWISE)");
+}
+
+/*
  * Boot-arg membench=1: how fast this processor reads, writes and copies memory, in MB a second
  * (32 MB at a time, far more than any cache): what the memory's clock allows a processor, which
  * nobody here asks to be raised.
@@ -306,7 +353,17 @@ load_start(void)
  * left, with what is needed to vote for bandwidth on them -- only read. (membench=2 says the cores
  * together get no more from memory than one alone: 12 GB/s; nobody here votes for more.)
  */
-#define CMD_DB_PHYS             0x80860000UL
+#define CMD_DB_PHYS             cmd_db_phys()
+#define MIATOLL_SOC_BASE        0x00100000ul    /* where the loader says miatoll's peripherals begin (hakios.adreno.c) */
+
+extern vm_offset_t pe_arm_get_soc_base_phys(void);
+
+/* dt: reserved-memory cmd_db@80860000 on redwood; miatoll's is where its AOP says (hakios.adreno.c, step 1) */
+static vm_offset_t
+cmd_db_phys(void)
+{
+	return pe_arm_get_soc_base_phys() == MIATOLL_SOC_BASE ? 0x80820000UL : 0x80860000UL;
+}
 #define CMD_DB_SIZE             0x20000UL
 #define CMD_DB_BCM              5               /* the kind of resource in a slave's id: bus clock managers */
 
@@ -339,6 +396,21 @@ cpufreq_wanted(void)
 	uint32_t on = 0;
 
 	return PE_parse_boot_argn("cpufreq", &on, sizeof(on)) && on != 0;
+}
+
+/*
+ * miatoll's GPU (Adreno 618) does not vote for memory bandwidth through its GMU: Linux and the
+ * vendor's kgsl both vote for it from the processor (a618_build_bw_table: "the 618 GMU doesn't
+ * do bus scaling"). Without a vote the 3D core's reads stall in the cache and the bus interface
+ * (rbbm_status: UCHE, VBIF and CCU busy, nothing else) and it stops after a few hundred frames.
+ * So with gpu=1 there, the same vote as cpufreq=1 casts on redwood; the cores' clocks stay alone.
+ */
+static bool
+miatoll_gpu_wanted(void)
+{
+	uint32_t gpu = 0;
+
+	return pe_arm_get_soc_base_phys() == MIATOLL_SOC_BASE && PE_parse_boot_argn("gpu", &gpu, sizeof(gpu)) && gpu != 0;
 }
 
 static void
@@ -568,22 +640,40 @@ hakios_cpufreq_init(void)
 	if (enabled == 1) {
 		ddr_look();
 		ddr_slots();
-	} else if (enabled == 2 && cpufreq_wanted()) {
+	} else if (enabled == 2 && (cpufreq_wanted() || miatoll_gpu_wanted())) {
 		ddr_raise();
 	}
 	enabled = 0;
 	if (!PE_parse_boot_argn("cpufreq", &enabled, sizeof(enabled)) || !enabled) {
 		return;
 	}
-	for (unsigned int i = 0; i < topology->num_cpus; i++) {
-		cores[domain_of(topology->cpus[i].phys_id)]++;
-	}
 	/* (whichever core this thread happens to be on, and stays on or not: it only goes to the log) */
 	here = (uint32_t)(__builtin_arm_rsr64("MPIDR_EL1") >> 8) & 0xff;
 	before = loop_speed();
-	for (uint32_t domain = 0; domain < EPSS_DOMAINS; domain++) {
-		if (cores[domain] != 0) {
-			raise_domain(domain, cores[domain]);
+	if (pe_arm_get_soc_base_phys() == MIATOLL_SOC_BASE) {
+		uint32_t small = 0, big = 0;
+
+		for (unsigned int i = 0; i < topology->num_cpus; i++) {
+			if (((topology->cpus[i].phys_id >> 8) & 0xff) < 6) {
+				small++;
+			} else {
+				big++;
+			}
+		}
+		if (small != 0) {
+			raise_osm_group("Cortex-A55", OSM_PWRCL_PHYS, small);
+		}
+		if (big != 0) {
+			raise_osm_group("Cortex-A76", OSM_PERFCL_PHYS, big);
+		}
+	} else {
+		for (unsigned int i = 0; i < topology->num_cpus; i++) {
+			cores[domain_of(topology->cpus[i].phys_id)]++;
+		}
+		for (uint32_t domain = 0; domain < EPSS_DOMAINS; domain++) {
+			if (cores[domain] != 0) {
+				raise_domain(domain, cores[domain]);
+			}
 		}
 	}
 	printf("cpufreq: on core %u a loop ran at %u, now at %u\n", here, before, loop_speed());

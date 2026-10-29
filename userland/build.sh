@@ -376,6 +376,26 @@ if [ -d $IOS/rootfs/usr/lib ]; then
 	# and not by what select-system.py extracted here (--root-volume; seven jobs turn on the difference,
 	# fairplayd among them).
 	cp com.hakios.demo.plist com.hakios.wifi.plist root/LaunchDaemons/
+	# ... and the device's table of memory limits, which is not a job (mkjobs.py denies the word) but sits beside them:
+	# launchd reads /System/Library/LaunchDaemons/com.apple.jetsamproperties.<model>.plist, and that directory is this
+	# one. Without it every daemon gets launchd's default limit, and backboardd -- the window server, with Mesa and
+	# every layer's texture in it -- outgrew that within minutes: OS_REASON_JETSAM, code 6 (the per-process limit),
+	# and SpringBoard torn down with it. The table gives it none, as on the phone this image is (iPhone10,3, D22).
+	# One entry taken out: PosterBoard's, the wallpaper's process. Its 350 MB are an iPhone's, whose GPU memory is not
+	# the process's; here Mesa and its buffers are, and it went over within a quarter of a second of every start --
+	# killed (JETSAM_REASON_MEMORY_PERPROCESSLIMIT) and started again 58 times in a few minutes, the wallpaper
+	# taking two minutes to appear and vanishing again. 1024 MB only moved its death to two seconds in, and with no
+	# entry at all it met a cap as low as Apple's. So it is given none, explicitly: it draws the wallpaper as in the
+	# boots without any table -- where its growth then cost the whole phone memory (backboardd went, code 6: file
+	# cache thrashing) with the system image in RAM; the flash boot has a gigabyte more to give.
+	python3 - $IOS/rootfs/System/Library/LaunchDaemons/com.apple.jetsamproperties.D22.plist \
+	    root/LaunchDaemons/com.apple.jetsamproperties.D22.plist <<'PY'
+import plistlib, sys
+table = plistlib.load(open(sys.argv[1], 'rb'))
+table['Version4']['Angel']['Override']['com.apple.PosterBoard'] = {
+    'ActiveSoftMemoryLimit': -1, 'InactiveSoftMemoryLimit': -1, 'ActiveHardMemoryLimit': -1, 'InactiveHardMemoryLimit': -1}
+plistlib.dump(table, open(sys.argv[2], 'wb'), fmt=plistlib.FMT_BINARY)
+PY
 	VOLUME=""
 	[ -n "$FLASHBOOT" ] && [ -f $IOS/rootfs.slt ] && VOLUME="--root-volume $IOS/rootfs.slt"
 	[ -n "$IOS_JOBS" ] && OSLOG=${OSLOG-com.apple.backboardd} ./mkjobs.py ${REST:+--rest} $VOLUME $IOS/rootfs root/LaunchDaemons $IOS_JOBS
@@ -406,6 +426,12 @@ fi
 if [ -f ../fw-haptic/aw8697_haptic.bin ]; then
 	mkdir -p root/fw
 	install -m 0644 ../fw-haptic/aw8697_haptic.bin root/fw/
+fi
+# ... and miatoll's touch screen firmware (its FT8756 keeps none: devices/miatoll/drivers/input/hakios.miatoll_touch.c loads it at every boot,
+# ft8756=1), Xiaomi's, made by ../devices/miatoll/tools/mk-fw-touch-miatoll.sh into ../fw-touch (176 KB; not in the repository)
+if [ -f ../fw-touch/ft8756.bin ]; then
+	mkdir -p root/fw
+	install -m 0644 ../fw-touch/ft8756.bin root/fw/
 fi
 # ... and the cameras' register tables (drivers/camera/hakios.camera.c, cam=2 and up), made by tools/camsensor.py out of
 # the sensors' module files of Android's camera stack, the phone's /vendor/lib64/camera/com.qti.sensormodule.
@@ -548,7 +574,8 @@ fi
 # --- the system image -----------------------------------------------------------------------------
 if [ -f $IOS/system.manifest ] && [ -f $CACHE/dyld_shared_cache_arm64 ] &&
 	{ [ ! -f system.apfs ] || [ obj/stage0 -nt system.apfs ] || [ $IOS/system.manifest -nt system.apfs ] ||
-	  [ $IOS/cryptex -nt system.apfs ] || [ $IOS/cryptex-app -nt system.apfs ] || [ -n "$SYSTEM" ]; }; then
+	  [ $IOS/cryptex -nt system.apfs ] || [ $IOS/cryptex-app -nt system.apfs ] || [ -n "$SYSTEM" ] ||
+	  { [ -n "$SLIM" ] && [ "$SLIM" -nt system.apfs ]; }; }; then
 	# what sysimage/select-system.py has chosen since sysimage/rootfs was extracted is not in it, and would not be
 	# in the image either (so it was once with the audio plug-ins and the system's sounds: iOS found no
 	# speaker and played nothing, though our device was there and the kernel's side worked)
@@ -640,9 +667,40 @@ if [ -f $IOS/system.manifest ] && [ -f $CACHE/dyld_shared_cache_arm64 ] &&
 		# -f: a cryptex fetched with the cache already in it would otherwise stop the build
 		ln -f "$f" $D/
 	done
+	# SLIM=<file>: paths (one per line, as in the image, # for comments) left out of the system image, for a
+	# phone with less RAM (slim.miatoll); out of the tree and out of a copy of the manifest, which would
+	# otherwise make an empty directory of each
+	MANIFEST=$IOS/system.manifest
+	if [ -n "$SLIM" ]; then
+		MANIFEST=$PWD/system.slim.manifest
+		python3 - "$SLIM" $IOS/system.manifest "$MANIFEST" sysroot <<'PY'
+import os, shutil, sys
+paths = [l.strip().strip('/') for l in open(sys.argv[1]) if l.strip() and not l.lstrip().startswith('#')]
+gone = 0
+for p in paths:
+    full = os.path.join(sys.argv[4], p)
+    if os.path.isdir(full) and not os.path.islink(full):
+        shutil.rmtree(full); gone += 1
+    elif os.path.lexists(full):
+        os.unlink(full); gone += 1
+    else:
+        print(f'build.sh: SLIM: {p} is not in the image', file=sys.stderr)
+kept = dropped = 0
+with open(sys.argv[3], 'wb') as out:
+    for raw in open(sys.argv[2], 'rb'):
+        f = raw.rstrip(b'\n').split(b'\t')
+        path = f[3].decode('utf-8', 'surrogateescape').strip('/') if len(f) > 3 else ''
+        if any(path == p or path.startswith(p + '/') for p in paths):
+            dropped += 1
+        else:
+            out.write(raw); kept += 1
+print(f'build.sh: SLIM: {gone} of {len(paths)} paths left out, {dropped} manifest lines dropped')
+PY
+	fi
 	# zlib where it saves room, as Apple keeps the root (a small file whole in its attribute): 5.4 GB of
 	# files in 2.5 GB, what fits into the phone's RAM beside iOS
-	python3 ../tools/apfs/mkapfs.py -z -o system.apfs System=sysroot,manifest=$IOS/system.manifest | tail -1
-	[ -z "$CHECK" ] || ../tools/apfs/check-image.sh system.apfs System=sysroot,manifest=$IOS/system.manifest
+	python3 ../tools/apfs/mkapfs.py -z -o system.apfs System=sysroot,manifest=$MANIFEST | tail -1
+	[ -z "$CHECK" ] || ../tools/apfs/check-image.sh system.apfs System=sysroot,manifest=$MANIFEST
+	rm -f system.slim.manifest
 	rm -rf sysroot
 fi
