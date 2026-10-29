@@ -3336,6 +3336,20 @@ whole_thread(__unused void *parameter, __unused wait_result_t result)
 	for (unsigned waited = 0; waited < 300 && rootvnode == NULLVP; waited++) {
 		sleep_ms(200);
 	}
+	{
+		/*
+		 * adsp_after=S: S seconds more before the DSP is touched, so that iOS is up and the log can be read over the cable
+		 * while it comes up (miatoll, 30 October: the boot stopped at the firmware's logo, with nothing to read, the first
+		 * time the DSP got past its image).
+		 */
+		uint32_t after = 0;
+
+		PE_parse_boot_argn("adsp_after", &after, sizeof(after));
+		if (after != 0) {
+			tell("adsp: the audio DSP is brought up %u s from now (adsp_after)\n", after);
+			sleep_ms(after * 1000);
+		}
+	}
 	run_steps();
 	for (unsigned i = 0; i < sizeof(qrtr_servers) / sizeof(qrtr_servers[0]); i++) {
 		services += qrtr_servers[i].there;
