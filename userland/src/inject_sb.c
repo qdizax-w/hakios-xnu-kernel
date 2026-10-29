@@ -1329,6 +1329,40 @@ status_bar_provider(void)
 	}
 }
 
+/*
+ * Boot-arg lite_ui=1: the two accessibility settings that make the user interface cheap to draw, set before SpringBoard
+ * draws anything. The frames of the home screen's pages cost the GPU little here (frames.py: 50-60 a second), but an app
+ * opening or closing costs 35-55 ms a frame of waiting for the GPU: the zoom and, above all, the blurs behind and
+ * around the app (the dock, the folders, the app switcher, the banners). Reduce Transparency draws those flat, Reduce
+ * Motion replaces the zoom with a cross-fade. lite_ui=0 sets both off again; without the argument nothing is touched.
+ */
+static void
+lite_ui(void)
+{
+	char args[1024] = "";
+	size_t size = sizeof(args) - 1;
+	const char *arg = NULL;
+	bool on;
+	CFStringRef domain = CFSTR("com.apple.Accessibility");
+
+	if (sysctlbyname("kern.bootargs", args, &size, NULL, 0) == 0) {
+		arg = strstr(args, "lite_ui=");
+	}
+	if (arg != NULL && arg != args && arg[-1] != ' ') {
+		arg = NULL;
+	}
+	if (arg == NULL) {
+		return;         /* not asked for: whatever the person set in Settings stays */
+	}
+	on = arg[8] != '0';
+	CFPreferencesSetValue(CFSTR("ReduceMotionEnabled"), on ? kCFBooleanTrue : kCFBooleanFalse, domain,
+	    CFSTR("mobile"), kCFPreferencesAnyHost);
+	CFPreferencesSetValue(CFSTR("EnhancedBackgroundContrastEnabled"), on ? kCFBooleanTrue : kCFBooleanFalse, domain,
+	    CFSTR("mobile"), kCFPreferencesAnyHost);
+	CFPreferencesSynchronize(domain, CFSTR("mobile"), kCFPreferencesAnyHost);
+	say("hakios: lite_ui=%d: Reduce Motion and Reduce Transparency %s\n", on, on ? "on" : "off");
+}
+
 __attribute__((constructor))
 static void
 hakios_springboard_init(void)
@@ -1364,6 +1398,7 @@ hakios_springboard_init(void)
 	 */
 	load_tweaks();
 	status_bar_provider();                  /* before SpringBoard makes its first status bar */
+	lite_ui();
 	slide = (uintptr_t)_dyld_get_shared_cache_range(&length) - CACHE_BASE;
 	activation = replace_method("SBLockdownManager", "_setupActivationState", 0x1c4bc8dfcUL, (IMP)setup_activation_state);
 	original_set_setup_required_reason = (void (*)(id, SEL, long))replace_method("SBSetupManager",
