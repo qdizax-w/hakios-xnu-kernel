@@ -1,0 +1,138 @@
+# Build what miatoll needs that only builds on Linux: the kernel, the loader, Mu-Silicium 3.6 (clang 18)
+# and the boot image for `fastboot boot`. No Apple files go in or come out: the iOS image is made on the
+# computer that boots the phone (sysimage/fetch.sh, userland/build.sh).
+name: miatoll
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [hakios]
+    paths: ['xnu/**', 'xnu-deps/**', 'xnuloader/**', 'drivers/**', 'configs/**', 'devices/manifest.conf', 'tools/**', 'userland/**', 'mkxnuimg.py', '.github/workflows/miatoll.yml']
+
+jobs:
+  kernel:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Packages
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -yq build-essential git curl clang lld llvm python3 perl xz-utils flex bison m4 autoconf automake libtool uuid-dev libssl-dev libbsd-dev zlib1g-dev
+
+      - name: theos (cctools + iPhoneOS16.5.sdk)
+        run: |
+          T=$HOME/theos
+          git clone -q --depth 1 https://github.com/theos/theos.git $T
+          mkdir -p $T/toolchain
+          curl -sfL https://github.com/L1ghtmann/llvm-project/releases/download/test-210562a/iOSToolchain-x86_64.tar.xz | tar -xJ -C $T/toolchain
+          [ -x $T/toolchain/linux/iphone/bin/ld ] || { find $T/toolchain -maxdepth 4 | head -50; exit 1; }
+          git clone -q --depth 1 --filter=blob:none --sparse https://github.com/theos/sdks.git /tmp/sdks
+          git -C /tmp/sdks sparse-checkout set iPhoneOS16.5.sdk
+          mv /tmp/sdks/iPhoneOS16.5.sdk $T/sdks/
+
+      - name: Kernel
+        run: |
+          python3 tools/hakios-device.py sync
+          python3 tools/hakios-config.py defconfig miatoll
+          xnu/apply.sh
+          xnu-deps/setup.sh || { for f in xnu-deps/*.log; do echo "=== $f"; grep -n -iE 'error|not found|No such' $f | head -30; tail -40 $f; done; exit 1; }
+          # ends with the export check's error after the kernel is linked (xnu/README.md): judge by the file
+          KERNEL_LOG=kernel-build.log tools/make-kernel.sh -j"$(nproc)" > /dev/null 2>&1 || true
+          K=xnu-src/xnu-8796.121.2/BUILD/obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837
+          [ -f $K ] || { grep -n 'error:' kernel-build.log | head -50; tail -80 kernel-build.log; exit 1; }
+          mkdir -p out && cp $K out/ && ls -la out
+
+      - name: Userland programs and Mesa (our code only)
+        run: |
+          sudo apt-get install -yq meson ninja-build pkg-config python3-venv
+          # build.sh compiles the dynamic programs only beside an iOS tree; an empty stand-in is enough to
+          # compile against the SDK. The image steps after that need the real iOS files and fail here:
+          # what is wanted is obj/, which is then assembled on the computer that boots the phone (PREBUILT=1)
+          mkdir -p sysimage/rootfs/usr/lib
+          python3 tools/hakios-device.py sync
+          source devices/miatoll/boot.conf
+          (cd userland && env FLASHBOOT=1 $USERLAND_VARS ./build.sh) > userland-build.log 2>&1 || true
+          ls -la userland/obj
+          for f in init stage0 var_store libhakios.dylib libhakios.sb.dylib libhakios.gl.dylib libOSMesa.8.dylib; do
+            [ -f userland/obj/$f ] || { echo "missing userland/obj/$f"; tail -80 userland-build.log; exit 1; }
+          done
+          mkdir -p out/userland && cp -r userland/obj/* out/userland/ && rm -f out/userland/*.o out/userland/*.h
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: kernel
+          path: out/mach.development.bcm2837
+      - uses: actions/upload-artifact@v5
+        with:
+          name: userland-programs
+          path: out/userland/
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: userland-build-log
+          path: userland-build.log
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: kernel-build-log
+          path: kernel-build.log
+          if-no-files-found: ignore
+
+  uefi:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Packages
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -yq build-essential git curl clang-18 lld-18 llvm-18 nasm uuid-dev iasl \
+            python3 python3-venv python3-pip gcc-aarch64-linux-gnu mono-devel
+
+      - name: "Loader, compiled with a placeholder identity (the real one is Apple's, made where the phone is booted)"
+        run: |
+          export PATH=/usr/lib/llvm-18/bin:$PATH
+          # xnuloader/identity.h comes from the iPhone's own device tree in Apple's IPSW and stays off the repository
+          # and its artifacts; this build only shows that the loader compiles. xl enter packs the local loader.
+          xnuloader/mkidentity.sh --placeholder
+          xnuloader/build.sh
+
+      - name: Mu-Silicium 3.6 with the miatoll port
+        run: |
+          git config --global user.email ci@localhost && git config --global user.name ci
+          python3 tools/hakios-device.py sync
+          devices/miatoll/uefi/apply.sh
+          python3 -m venv venv && venv/bin/pip install -q -r Mu-Silicium-3.6/pip-requirements.txt
+
+      - name: UEFI (clang 18, Redmi Note 9S)
+        run: |
+          export PATH=/usr/lib/llvm-18/bin:$PATH
+          cd Mu-Silicium-3.6
+          source ../venv/bin/activate
+          CLANG_BIN=/usr/lib/llvm-18/bin/ python3 build_uefi.py -d miatoll -m 0 -r RELEASE
+          ls -la Build/miatollPkg/RELEASE_CLANGPDB/FV/
+
+      - name: Boot image
+        run: |
+          export PATH=/usr/lib/llvm-18/bin:$PATH
+          source devices/miatoll/boot.conf
+          mkdir -p out
+          python3 xnuloader/mkpayload.py -o out/usb-payload.bin loader.efi=xnuloader/loader.efi --usb
+          FD_BASE=$FD_BASE FD_SIZE=$FD_SIZE PAYLOAD_BASE=$PAYLOAD_BASE UEFI_TARGET=$UEFI_TARGET MU_SILICIUM=$MU_SILICIUM \
+            python3 mkxnuimg.py -p out/usb-payload.bin -o out/miatoll-boot.img
+          # what mkxnuimg needs to repack the image around a new loader, without the 3 GB tree
+          M=out/Mu-Silicium-3.6
+          mkdir -p $M/Build/miatollPkg/RELEASE_CLANGPDB $M/Resources/DTBs $M/Resources/Scripts
+          cp -r Mu-Silicium-3.6/Build/miatollPkg/RELEASE_CLANGPDB/FV $M/Build/miatollPkg/RELEASE_CLANGPDB/
+          cp -r Mu-Silicium-3.6/BootShim $M/
+          cp Mu-Silicium-3.6/Resources/DTBs/miatoll.dtb $M/Resources/DTBs/
+          cp Mu-Silicium-3.6/Resources/ramdisk $M/Resources/ 2>/dev/null || true
+          cp Mu-Silicium-3.6/Resources/Scripts/mkbootimg.py $M/Resources/Scripts/
+          ls -la out
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: miatoll-boot
+          path: out/
