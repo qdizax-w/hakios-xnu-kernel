@@ -85,6 +85,18 @@ extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 extern uint64_t kvtophys(vm_offset_t va);
 extern kern_return_t thread_terminate(thread_t thread);
 extern void loader_log_putc(char c);
+extern vm_offset_t pe_arm_get_soc_base_phys(void);
+
+/*
+ * miatoll (the Redmi Note 9S, SM7125), told apart by the SoC base: its speaker is one TAS2562 on the tertiary MI2S
+ * interface (dt: qcom,msm-dai-q6-mi2s-tert, the sound card's qcom,tert-mi2s-gpios; the amplifier
+ * devices/miatoll/drivers/audio/hakios.miatoll_speaker.c), not two Awinic amplifiers on the primary TDM: AFE port
+ * 0x1004 (TERTIARY_MI2S_RX) with an I2S configuration and no group, the interface's bit clock 0x104 (TER_MI2S_IBIT),
+ * the pins GPIO 63 (bit clock), 64 (word select), 65 (data out) and 66 (data in) of the TLMM's north tile, function
+ * mi2s_2, and the DSP's view of our memory through stream 0x1001 (dt: iommus of qcom,msm-audio-ion).
+ */
+#define MIATOLL_SOC_BASE        0x00100000ul
+static bool miatoll;
 
 /* The SMMU's match registers and contexts are found free and taken by the Wi-Fi's start as well (hakios.wifi.c). */
 extern lck_mtx_t hakios_smmu_lock;
@@ -202,24 +214,33 @@ put(struct block *b, const char *name, uint32_t offset, uint32_t value)
 
 /* ---- the TDM pins ------------------------------------------------------------------------------------- */
 
-static struct block tlmm = { "pin controller", 0x0f100000, 0x100000 };
+static struct block tlmm = { "pin controller", 0x0f100000, 0x100000 };         /* miatoll: its north tile, 0x03900000 */
 #define GPIO_CFG(n)             (0x1000u * (n))         /* [1:0] pull, [5:2] function, [8:6] drive (mA / 2 - 1), [9] output */
 #define GPIO_IO(n)              (0x1000u * (n) + 4)     /* bit 0 in, bit 1 out */
 #define CFG_MI2S0               (1u << 2)
 #define CFG_8MA                 (3u << 6)
 #define CFG_OUTPUT              (1u << 9)
 
-static const struct {
+struct pin {
 	unsigned pin;
 	const char *name;
 	uint32_t cfg, io;               /* Android's active state */
-} tdm_pins[] = {
+};
+static const struct pin redwood_pins[] = {
 	{ 97, "gpio97 (bit clock)", CFG_MI2S0 | CFG_8MA | CFG_OUTPUT, 2 },
 	{ 100, "gpio100 (frame sync)", CFG_MI2S0 | CFG_8MA | CFG_OUTPUT, 2 },
 	{ 98, "gpio98 (data in)", CFG_MI2S0 | CFG_8MA, 0 },
 	{ 99, "gpio99 (data out)", CFG_MI2S0 | CFG_8MA, 0 },
 };
-#define TDM_PINS                (sizeof(tdm_pins) / sizeof(tdm_pins[0]))
+/* miatoll's (dt: tert_i2s_*_active; pinctrl-atoll.c: mi2s_2 is function 3 on GPIO 63, 2 on 64 to 66) */
+static const struct pin miatoll_pins[] = {
+	{ 63, "gpio63 (bit clock)", 3u << 2 | CFG_8MA | CFG_OUTPUT, 2 },
+	{ 64, "gpio64 (word select)", 2u << 2 | CFG_8MA | CFG_OUTPUT, 2 },
+	{ 65, "gpio65 (data out, SD0)", 2u << 2 | CFG_8MA, 0 },
+	{ 66, "gpio66 (data in, SD1)", 2u << 2 | CFG_8MA | CFG_OUTPUT, 2 },
+};
+#define TDM_PINS                4
+static const struct pin *tdm_pins = redwood_pins;
 static uint32_t found_cfg[TDM_PINS], found_io[TDM_PINS];
 static bool pins_taken;
 
@@ -335,11 +356,18 @@ command(const char *what, uint8_t service, uint16_t port, uint32_t opcode, const
 #define AFE_MODULE_CLOCK_SET                    0x0001028fu
 #define AFE_PARAM_ID_CLOCK_SET                  0x00010290u
 
-#define PORT                    0x9000          /* PRI_TDM_RX_0 */
+#define PORT                    port            /* PRI_TDM_RX_0 (0x9000); miatoll: TERTIARY_MI2S_RX (0x1004) */
+static uint16_t port = 0x9000;
 #define GROUP                   0x9100          /* PRI_TDM_RX */
 #define GROUP_OTHER_PORT        0x9002
 #define PORT_INVALID            0xffff
 #define CLOCK_PRI_TDM_IBIT      0x200
+#define CLOCK_TER_MI2S_IBIT     0x104
+#define CLOCK_COUPLE_NO         1
+#define AFE_PARAM_ID_I2S_CONFIG 0x0001020du
+#define I2S_SD0                 1
+#define I2S_STEREO              1
+#define I2S_WS_INTERNAL         1
 #define CLOCK_INVERT_COUPLE_NO  4
 #define RATE                    48000
 #define SLOTS                   2
@@ -374,6 +402,13 @@ struct afe_tdm {
 	uint32_t version, channels, rate, bits;
 	uint16_t data_format, sync_mode, sync_source, slots, data_out, invert_sync, data_delay, slot_bits;
 	uint32_t slot_mask;
+} __attribute__((packed));
+
+struct afe_i2s {
+	uint32_t version;
+	uint16_t bits, lines, stereo, ws_source;
+	uint32_t rate;
+	uint16_t data_format, reserved;
 } __attribute__((packed));
 
 struct afe_slot_mapping {
@@ -424,6 +459,12 @@ afe_clock(bool on)
 {
 	struct afe_clock_set clock = { 1, CLOCK_PRI_TDM_IBIT, RATE * SLOT_BITS * SLOTS, CLOCK_INVERT_COUPLE_NO, 0, on };
 
+	if (miatoll) {
+		clock.id = CLOCK_TER_MI2S_IBIT;
+		clock.attribute = CLOCK_COUPLE_NO;
+		return afe_service_param(on ? "the tertiary MI2S bit clock (0x104) at 3.072 MHz, on" : "the MI2S bit clock, off",
+		           AFE_MODULE_CLOCK_SET, AFE_PARAM_ID_CLOCK_SET, &clock, sizeof(clock));
+	}
 	return afe_service_param(on ? "the TDM bit clock (0x200) at 3.072 MHz, on" : "the TDM bit clock, off", AFE_MODULE_CLOCK_SET,
 	           AFE_PARAM_ID_CLOCK_SET, &clock, sizeof(clock));
 }
@@ -445,6 +486,19 @@ afe_on(void)
 		                            .offsets = { 0, 4, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff } };
 	uint16_t start[2] = { PORT, 0 };
 
+	if (miatoll) {
+		struct afe_i2s i2s = { .version = 1, .bits = PORT_BITS, .lines = I2S_SD0, .stereo = I2S_STEREO,
+			               .ws_source = I2S_WS_INTERNAL, .rate = RATE, .data_format = 0, .reserved = 0 };
+
+		announce("the DSP is asked for the tertiary MI2S interface's bit clock, the port and its start (AFE)");
+		clock_on = afe_clock(true);
+		if (!clock_on || !afe_port_param("the port 0x1004: I2S, 2 channels of 32 bits at 48 kHz on SD0, the word select ours",
+		    AFE_MODULE_AUDIO_DEV_INTERFACE, AFE_PARAM_ID_I2S_CONFIG, &i2s, sizeof(i2s))) {
+			return false;
+		}
+		port_on = command("the port 0x1004, started", APR_SVC_AFE, 0, AFE_PORT_CMD_DEVICE_START, start, sizeof(start), 0, NULL);
+		return port_on;
+	}
 	announce("the DSP is asked for the TDM interface's bit clock, the group, the port and its start (AFE)");
 	clock_on = afe_clock(true);
 	if (!clock_on) {
@@ -474,7 +528,8 @@ afe_off(void)
 	struct afe_group_enable disable = { GROUP, 0 };
 
 	if (port_on) {
-		command("the port 0x9000, stopped", APR_SVC_AFE, 0, AFE_PORT_CMD_DEVICE_STOP, stop, sizeof(stop), 0, NULL);
+		command(miatoll ? "the port 0x1004, stopped" : "the port 0x9000, stopped", APR_SVC_AFE, 0, AFE_PORT_CMD_DEVICE_STOP, stop,
+		    sizeof(stop), 0, NULL);
 		port_on = false;
 	}
 	if (group_on) {
@@ -525,7 +580,8 @@ static struct block apps_smmu_context = { "apps smmu, the audio context", 0, 0x1
 #define PTE_ADDRESS             0x0000fffffffff000ull
 #define AUDIO_PTE               (3ull | 1ull << 6 | 2ull << 8 | 1ull << 10 | 1ull << 11)       /* as hakios.wifi.c's */
 
-#define AUDIO_STREAM            0x1801
+#define AUDIO_STREAM            audio_stream    /* 0x1801; miatoll's 0x1001 (its low bits are the same: 1) */
+static uint32_t audio_stream = 0x1801;
 #define AUDIO_ADDRESSES         0x10000000ull   /* dt: qcom,iommu-dma-addr-pool of qcom,msm-audio-ion */
 #define AUDIO_STREAM_BITS       (1ull << 32)    /* the stream's low bits (0x1801 & 0xf), where the DSP takes them from */
 
@@ -1399,7 +1455,7 @@ sound_thread(__unused void *parameter, __unused wait_result_t result)
 		    "the port and a stream with a test tone, the amplifiers off" :
 		    "the port, a stream with a test tone, and the amplifiers", seconds);
 	}
-	if (level >= 3) {
+	if (level >= 3 && !miatoll) {           /* (miatoll's TAS2562 takes no configuration file) */
 		acf = hakios_adsp_fw_file("aw882xx_acf.bin", &acf_size);
 		if (acf == NULL) {
 			say("sound: no /fw/aw882xx_acf.bin: put the phone's /vendor/etc/aw882xx_acf.bin into fw-audio/ and run SYSTEM=1 "
@@ -1417,14 +1473,15 @@ sound_thread(__unused void *parameter, __unused wait_result_t result)
 		ok = false;
 		hakios_adsp_apr_events(events);
 	}
-	announce("the TDM pins (GPIO 97 to 100) to the interface, as Android's active state has them");
+	announce(miatoll ? "the MI2S pins (GPIO 63 to 66) to the interface, as Android's active state has them" :
+	    "the TDM pins (GPIO 97 to 100) to the interface, as Android's active state has them");
 	pins_on();
 	if (!afe_on()) {
 		goto out;
 	}
 	sleep_ms(20);
-	pin_activity(97, "the bit clock (gpio97)", &changes, &ones);
-	pin_activity(100, "the frame sync (gpio100)", &sync_changes, &sync_ones);
+	pin_activity(tdm_pins[0].pin, tdm_pins[0].name, &changes, &ones);
+	pin_activity(tdm_pins[1].pin, tdm_pins[1].name, &sync_changes, &sync_ones);
 	say("sound: %s\n", changes > 100 && sync_changes > 4 ? "THE TDM CLOCK AND FRAME SYNC RUN at the pins" :
 	    "THE PINS DO NOT SHOW A RUNNING TDM CLOCK");
 	if (level == 1) {
@@ -1504,6 +1561,13 @@ hakios_sound_dsp_up(void)
 	}
 	if (level > 4) {
 		level = 4;
+	}
+	if (pe_arm_get_soc_base_phys() == MIATOLL_SOC_BASE) {
+		miatoll = true;
+		tlmm.phys = 0x03900000;
+		tdm_pins = miatoll_pins;
+		port = 0x1004;
+		audio_stream = 0x1001;
 	}
 	PE_parse_boot_argn("sound_secs", &seconds, sizeof(seconds));
 	PE_parse_boot_argn("sound_below", &below, sizeof(below));

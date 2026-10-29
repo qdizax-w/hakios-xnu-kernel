@@ -18,9 +18,10 @@ driver SPEAKER
 driver SOUND
 	file    bsd/dev/hakios.sound.c
 	file    bsd/dev/hakios.guard.c
-	requires ADSP SPEAKER
+	requires ADSP
 	help    the speakers playing (sound=N): what the DSP's services are told, the feeder, and the speakers' guard
-	help    that limits what the amplifiers get
+	help    that limits what the amplifiers get. The amplifiers' functions come from SPEAKER (the POCO's) or from a device's own
+	help    driver (miatoll's MIATOLL_SPEAKER): one of them has to be built with it
 
 driver MIC
 	file    bsd/dev/hakios.mic.c

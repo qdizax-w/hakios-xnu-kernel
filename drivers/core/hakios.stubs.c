@@ -116,7 +116,7 @@ void hakios_virtio_net_init(void) {}
 void hakios_virtio_sound_init(void) {}
 #endif
 
-#ifndef HAKIOS_SPEAKER
+#if !defined(HAKIOS_SPEAKER) && !defined(HAKIOS_MIATOLL_SPEAKER)
 void hakios_speaker_init(void) {}
 #endif
 
