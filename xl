@@ -324,6 +324,8 @@ phone_ip() {
 	[ -z "$ip" ] && ip link 2>/dev/null | grep -qi 02:00:5e:77:ee:01 && ip=10.42.0.100   # (NetworkManager's first choice)
 	# macOS: no ip(8); arp prints the address without leading zeros (2:0:5e:77:ee:2), Internet Sharing's 192.168.2.x
 	[ -z "$ip" ] && ip=$(arp -an 2>/dev/null | awk 'tolower($0) ~ / at 2:0:5e:77:ee:2 / {gsub(/[()]/, "", $2); print $2; exit}')
+	# the kernel's own address on the cable (drivers/net/hakios.usbnet.c, ud_own_address): there before iOS is up
+	[ -z "$ip" ] && ip=169.254.42.42
 	[ -n "$XL_PHONE_IP" ] && ip=$XL_PHONE_IP
 	[ -n "$ip" ] && timeout 3 bash -c "exec 3<>/dev/tcp/$ip/5140" 2>/dev/null && echo "$ip"
 }

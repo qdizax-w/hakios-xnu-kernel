@@ -6454,6 +6454,11 @@ hakios_mpss_init(void)
 		pause_ms = 0;
 		listen_seconds = 1;
 		new_from = STEPS + 1;
+		/* modem_pause=MS with modem=1 as well: every step waits after it is announced (a log read over the cable shows the last) */
+		if (PE_parse_boot_argn("modem_pause", &pause_ms, sizeof(pause_ms)) && pause_ms != 0) {
+			new_from = 1;
+			quiet = false;
+		}
 		if (kernel_thread_start(whole_thread, NULL, &thread) != KERN_SUCCESS) {
 			printf("mpss: no thread: the modem is not brought up\n");
 			return;

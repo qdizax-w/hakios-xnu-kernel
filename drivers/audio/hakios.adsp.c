@@ -3364,6 +3364,11 @@ hakios_adsp_init(void)
 		pause_ms = 0;
 		listen_seconds = 1;
 		new_from = STEPS + 1;
+		/* adsp_pause=MS with adsp=1 as well: every step waits after it is announced */
+		if (PE_parse_boot_argn("adsp_pause", &pause_ms, sizeof(pause_ms)) && pause_ms != 0) {
+			new_from = 1;
+			quiet = false;
+		}
 		if (kernel_thread_start(whole_thread, NULL, &thread) != KERN_SUCCESS) {
 			printf("adsp: no thread: the audio DSP is not brought up\n");
 			return;

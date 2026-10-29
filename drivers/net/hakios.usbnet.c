@@ -28,6 +28,9 @@
 #include <mach/vm_param.h>
 #include <net/ethernet.h>
 #include <netinet/in.h>
+#include <netinet/in_var.h>
+#include <net/if.h>
+#include <sys/sockio.h>
 #include <pexpert/pexpert.h>
 #include <sys/kpi_mbuf.h>
 #include <sys/kpi_socket.h>
@@ -691,6 +694,61 @@ ud_answer(socket_t so, char *log)
 	}
 }
 
+/*
+ * An address of the kernel's own on the cable's interface, 169.254.42.42/16, from the moment it is attached:
+ * iOS gives the interface its address only once it is up (configd), and a boot that stops before that --
+ * at the Apple logo -- left nothing to ask for the log. The computer's side of the cable has a link-local
+ * address of its own (macOS) and reaches this one directly. usbnet_addr=0: not set.
+ */
+static bool
+ud_own_address(void)
+{
+	struct sockaddr_in *sin;
+	struct in_aliasreq ifra;
+	struct ifreq ifr;
+	socket_t so = NULL;
+	uint32_t want = 1;
+	int up, added;
+
+	PE_parse_boot_argn("usbnet_addr", &want, sizeof(want));
+	if (want == 0) {
+		return true;
+	}
+	if (sock_socket(PF_INET, SOCK_DGRAM, IPPROTO_UDP, NULL, NULL, &so) != 0) {
+		return false;           /* (the network stack is not up yet) */
+	}
+	bzero(&ifr, sizeof(ifr));
+	strlcpy(ifr.ifr_name, "en0", sizeof(ifr.ifr_name));
+	up = sock_ioctl(so, SIOCGIFFLAGS, &ifr);
+	if (up != 0) {
+		sock_close(so);
+		return false;           /* (en0 is not attached yet) */
+	}
+	{
+		ifr.ifr_flags |= IFF_UP;
+		up = sock_ioctl(so, SIOCSIFFLAGS, &ifr);
+	}
+	bzero(&ifra, sizeof(ifra));
+	strlcpy(ifra.ifra_name, "en0", sizeof(ifra.ifra_name));
+	sin = (struct sockaddr_in *)&ifra.ifra_addr;
+	sin->sin_len = sizeof(*sin);
+	sin->sin_family = AF_INET;
+	sin->sin_addr.s_addr = htonl(0xa9fe2a2a);               /* 169.254.42.42 */
+	sin = (struct sockaddr_in *)&ifra.ifra_mask;
+	sin->sin_len = sizeof(*sin);
+	sin->sin_family = AF_INET;
+	sin->sin_addr.s_addr = htonl(0xffff0000);
+	sin = (struct sockaddr_in *)&ifra.ifra_broadaddr;
+	sin->sin_len = sizeof(*sin);
+	sin->sin_family = AF_INET;
+	sin->sin_addr.s_addr = htonl(0xa9feffff);
+	added = sock_ioctl(so, SIOCAIFADDR, &ifra);
+	sock_close(so);
+	printf("usbnet: en0 up (%d) with an address of its own, 169.254.42.42 (%d): the log and the screen are there from now on\n",
+	    up, added);
+	return true;
+}
+
 static void
 ud_serve(void *arg __unused, wait_result_t wr __unused)
 {
@@ -702,6 +760,9 @@ ud_serve(void *arg __unused, wait_result_t wr __unused)
 
 	if (kmem_alloc(kernel_map, &log, UD_LOG_MAX, KMA_KOBJECT | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
 		return;
+	}
+	for (unsigned waited = 0; !ud_own_address() && waited < 120; waited++) {
+		ud_sleep_ms(1000);      /* (until the network stack is up and en0 attached: two minutes at most) */
 	}
 	for (;;) {
 		if (listener == NULL) {
