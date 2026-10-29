@@ -427,6 +427,11 @@ if [ -f ../fw-haptic/aw8697_haptic.bin ]; then
 	mkdir -p root/fw
 	install -m 0644 ../fw-haptic/aw8697_haptic.bin root/fw/
 fi
+# ... and miatoll's, its AW8624's /vendor/firmware/aw8624_haptic.bin (devices/miatoll/drivers/haptic/hakios.miatoll_haptic.c)
+if [ -f ../fw-haptic/aw8624_haptic.bin ]; then
+	mkdir -p root/fw
+	install -m 0644 ../fw-haptic/aw8624_haptic.bin root/fw/
+fi
 # ... and miatoll's touch screen firmware (its FT8756 keeps none: devices/miatoll/drivers/input/hakios.miatoll_touch.c loads it at every boot,
 # ft8756=1), Xiaomi's, made by ../devices/miatoll/tools/mk-fw-touch-miatoll.sh into ../fw-touch (176 KB; not in the repository)
 if [ -f ../fw-touch/ft8756.bin ]; then
