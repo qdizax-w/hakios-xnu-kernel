@@ -1248,6 +1248,47 @@ load_tweaks(void)
 
 #include "brightness_hook.h"
 
+/*
+ * Control Center's brightness slider goes through BackBoardServices' C functions, not either method above (only
+ * Settings' slider reached the panel): it asks BKSDisplayBrightnessIsBrightnessLevelControlAvailable() first --
+ * no, here, with no backlight service in backboardd -- and sets the level with BKSDisplayBrightnessSet() or
+ * ...SetWithImplicitTransaction(). All three are interposed in SpringBoard, where Control Center runs: control is
+ * available (the kernel's device is), and each level goes to the kernel before the original. The level is a float
+ * (s0); what follows it is passed on as the integer registers it came in. The symbols are found when SpringBoard
+ * loads (-Wl,-U in userland/build.sh: the SDK has no BackBoardServices to link against).
+ */
+extern unsigned char BKSDisplayBrightnessIsBrightnessLevelControlAvailable(void);
+extern void BKSDisplayBrightnessSet(float level, long a, long b);
+extern void BKSDisplayBrightnessSetWithImplicitTransaction(float level, long a, long b);
+
+static unsigned char
+bh_bks_available(void)
+{
+	return access("/dev/hakios-backlight", W_OK) == 0 ? 1 : BKSDisplayBrightnessIsBrightnessLevelControlAvailable();
+}
+
+static void
+bh_bks_set(float level, long a, long b)
+{
+	bh_send("BKSDisplayBrightnessSet", level);
+	BKSDisplayBrightnessSet(level, a, b);
+}
+
+static void
+bh_bks_set_implicit(float level, long a, long b)
+{
+	bh_send("BKSDisplayBrightnessSetWithImplicitTransaction", level);
+	BKSDisplayBrightnessSetWithImplicitTransaction(level, a, b);
+}
+
+__attribute__((used)) static struct {
+	const void *ours, *theirs;
+} bks_brightness_interpose[] __attribute__((section("__DATA,__interpose"))) = {
+	{ (const void *)bh_bks_available, (const void *)BKSDisplayBrightnessIsBrightnessLevelControlAvailable },
+	{ (const void *)bh_bks_set, (const void *)BKSDisplayBrightnessSet },
+	{ (const void *)bh_bks_set_implicit, (const void *)BKSDisplayBrightnessSetWithImplicitTransaction },
+};
+
 static void
 bh_say(const char *format, ...)
 {

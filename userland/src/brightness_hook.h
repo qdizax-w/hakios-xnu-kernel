@@ -77,15 +77,19 @@ bh_set_property(id self, SEL selector, id value, id key)
 
 /* ---- -[SBDisplayBrightnessController setBrightnessLevel:(animated:)] -------------------------------- */
 
-static void (*bh_orig_level_f)(id, SEL, float);
-static void (*bh_orig_level_d)(id, SEL, double);
-static void (*bh_orig_level_anim_f)(id, SEL, float, BOOL);
-static void (*bh_orig_level_anim_d)(id, SEL, double, BOOL);
+/*
+ * Whatever these return is handed back: setBrightnessLevel:animated: returns a BOOL in iOS 16 (B24@0:8f16B20),
+ * and one that returns nothing leaves the register as it was, which is passed on unread.
+ */
+static BOOL (*bh_orig_level_f)(id, SEL, float);
+static BOOL (*bh_orig_level_d)(id, SEL, double);
+static BOOL (*bh_orig_level_anim_f)(id, SEL, float, BOOL);
+static BOOL (*bh_orig_level_anim_d)(id, SEL, double, BOOL);
 
-static void bh_level_f(id s, SEL c, float v) { bh_send("SBDisplayBrightnessController", v); bh_orig_level_f(s, c, v); }
-static void bh_level_d(id s, SEL c, double v) { bh_send("SBDisplayBrightnessController", v); bh_orig_level_d(s, c, v); }
-static void bh_level_anim_f(id s, SEL c, float v, BOOL a) { bh_send("SBDisplayBrightnessController", v); bh_orig_level_anim_f(s, c, v, a); }
-static void bh_level_anim_d(id s, SEL c, double v, BOOL a) { bh_send("SBDisplayBrightnessController", v); bh_orig_level_anim_d(s, c, v, a); }
+static BOOL bh_level_f(id s, SEL c, float v) { bh_send("SBDisplayBrightnessController", v); return bh_orig_level_f(s, c, v); }
+static BOOL bh_level_d(id s, SEL c, double v) { bh_send("SBDisplayBrightnessController", v); return bh_orig_level_d(s, c, v); }
+static BOOL bh_level_anim_f(id s, SEL c, float v, BOOL a) { bh_send("SBDisplayBrightnessController", v); return bh_orig_level_anim_f(s, c, v, a); }
+static BOOL bh_level_anim_d(id s, SEL c, double v, BOOL a) { bh_send("SBDisplayBrightnessController", v); return bh_orig_level_anim_d(s, c, v, a); }
 
 /* the type of the first argument after self and _cmd: 'f', 'd', or 0 */
 static char
@@ -118,9 +122,9 @@ bh_try(void)
 			char t = bh_arg_type(m);
 
 			if (t == 'f') {
-				bh_orig_level_f = (void (*)(id, SEL, float))method_setImplementation(m, (IMP)bh_level_f);
+				bh_orig_level_f = (BOOL (*)(id, SEL, float))method_setImplementation(m, (IMP)bh_level_f);
 			} else if (t == 'd') {
-				bh_orig_level_d = (void (*)(id, SEL, double))method_setImplementation(m, (IMP)bh_level_d);
+				bh_orig_level_d = (BOOL (*)(id, SEL, double))method_setImplementation(m, (IMP)bh_level_d);
 			}
 			bh_say("hakios: backlight: -[SBDisplayBrightnessController setBrightnessLevel:] (%s) %s\n",
 			    method_getTypeEncoding(m), t ? "caught" : "left alone: not a float or a double");
@@ -129,9 +133,9 @@ bh_try(void)
 			char t = bh_arg_type(m);
 
 			if (t == 'f') {
-				bh_orig_level_anim_f = (void (*)(id, SEL, float, BOOL))method_setImplementation(m, (IMP)bh_level_anim_f);
+				bh_orig_level_anim_f = (BOOL (*)(id, SEL, float, BOOL))method_setImplementation(m, (IMP)bh_level_anim_f);
 			} else if (t == 'd') {
-				bh_orig_level_anim_d = (void (*)(id, SEL, double, BOOL))method_setImplementation(m, (IMP)bh_level_anim_d);
+				bh_orig_level_anim_d = (BOOL (*)(id, SEL, double, BOOL))method_setImplementation(m, (IMP)bh_level_anim_d);
 			}
 			bh_say("hakios: backlight: -[SBDisplayBrightnessController setBrightnessLevel:animated:] (%s) %s\n",
 			    method_getTypeEncoding(m), t ? "caught" : "left alone: not a float or a double");
