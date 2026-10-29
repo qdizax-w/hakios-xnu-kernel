@@ -1727,8 +1727,12 @@ ramfs_mount(mount_t mp, __unused vnode_t devvp, __unused user_addr_t data, __unu
 	lck_mtx_init(&rm->rm_lock, &ramfs_lck_grp, LCK_ATTR_NULL);
 	rm->rm_mp = mp;
 	rm->rm_next_ino = RAMFS_ROOT_INO + 1;
-	/* a runaway writer must not be able to take the whole machine: a quarter of memory at most */
-	rm->rm_max_pages = (max_mem / 4) / PAGE_SIZE;
+	/*
+	 * A runaway writer must not be able to take the whole machine: half of memory at most, and 1.75 GiB, which is
+	 * what var_store's slot of 2 GiB (userland/src/var_store.c) holds with room for its headers. This is what the
+	 * data volume shows as its capacity: a quarter of 4 GB was 1 GB, of which iOS's own files took more than half.
+	 */
+	rm->rm_max_pages = MIN((uint64_t)max_mem / 2, 1792ULL << 20) / PAGE_SIZE;
 
 	rm->rm_hash = kalloc_type(struct ramfs_node *, RAMFS_HASH_SIZE, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 	rm->rm_root = ramfs_node_alloc(rm, VDIR, NULL);
