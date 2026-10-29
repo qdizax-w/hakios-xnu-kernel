@@ -235,5 +235,12 @@ PREP
 chmod 755 "$OUT/root/var/jb/prep.sh"
 rm -f "$OUT/root/var/jb/prep_bootstrap.sh"
 
+# TrollStore (opa334's release) beside Sileo in the prefix's Applications, which init has registered at every
+# boot: iOS 16.5 is among the versions its CoreTrust bypass covers
+get https://github.com/opa334/TrollStore/releases/latest/download/TrollStore.tar TrollStore.tar
+rm -rf "$TMP/ts" && mkdir -p "$TMP/ts" && tar -C "$TMP/ts" -xf "$OUT/debs/TrollStore.tar"
+rm -rf "$OUT/root/var/jb/Applications/TrollStore.app"
+cp -a "$TMP/ts/TrollStore.app" "$OUT/root/var/jb/Applications/"
+
 echo "mk-jb.sh: $OUT/root/var/jb ($(du -sh "$OUT/root/var/jb" | cut -f1), $(find "$OUT/root/var/jb" | wc -l) entries)"
 echo "          Sileo $(grep -m1 '^Version:' "$TMP/control/control" | cut -d' ' -f2), $(grep -c '^Package:' "$OUT/root/var/jb/Library/dpkg/status") packages in dpkg's database"
