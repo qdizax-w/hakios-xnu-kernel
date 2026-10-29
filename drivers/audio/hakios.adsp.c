@@ -906,6 +906,7 @@ rail_position(const char *name, uint32_t level, uint32_t *address)
 	if (cmd_db == NULL) {
 		uint64_t where = CMD_DB_PHYS;
 
+		mark(30);
 		if (bells_apcs) {
 			/* miatoll: the boot loader leaves the database's address in the AOP's message RAM (dt: qcom,cmd-db@c3f000c) */
 			vm_offset_t at = ml_io_map(0x0c3f0000, 0x1000);
@@ -920,6 +921,7 @@ rail_position(const char *name, uint32_t level, uint32_t *address)
 				return -1;
 			}
 		}
+		mark(31);
 		cmd_db = (const struct cmd_db_header *)ml_io_map_unmappable((vm_offset_t)where, CMD_DB_SIZE, VM_WIMG_WCOMB);
 	}
 	if (!(cmd_db->magic[0] == 0xdb && cmd_db->magic[1] == 0x30 && cmd_db->magic[2] == 0x03 && cmd_db->magic[3] == 0x0c)) {
@@ -989,6 +991,7 @@ rails(uint32_t level)
 		}
 		values[r] = (uint32_t)position;
 	}
+	mark(33);
 	need(&rsc);
 	/* (on a panic's way back to the loader no lock is taken: the other processors are stopped, and one of them may hold this one for good) */
 	if (!leaving) {
@@ -1019,6 +1022,7 @@ rails(uint32_t level)
 	wr(rsc.base + RSC_TCS(RPMH_TCS) + TCS_CONTROL, rd(rsc.base + RSC_TCS(RPMH_TCS) + TCS_CONTROL) & ~TCS_TRIGGER);
 	wr(rsc.base + RSC_TCS(RPMH_TCS) + TCS_CONTROL, rd(rsc.base + RSC_TCS(RPMH_TCS) + TCS_CONTROL) | TCS_ACTIVE_MODE);
 	wr(rsc.base + RSC_TCS(RPMH_TCS) + TCS_CONTROL, rd(rsc.base + RSC_TCS(RPMH_TCS) + TCS_CONTROL) | TCS_TRIGGER);
+	mark(34);
 	began = now_us();
 	while (now_us() - began < 100000) {
 		done = rd(rsc.base + RSC_IRQ_STATUS) & (1u << RPMH_TCS);
@@ -1036,6 +1040,7 @@ rails(uint32_t level)
 	if (!leaving) {
 		lck_mtx_unlock(&hakios_rsc_lock);
 	}
+	mark(35);
 	return done != 0;
 }
 
@@ -1800,14 +1805,28 @@ step_start(void)
 	bell_set("listened for", IPCC_ENABLE, IPCC_LPASS << 16 | IPCC_GLINK);
 	bzero(&doorbell, sizeof(doorbell));
 	lck_mtx_lock(&dsp_lock);
-	if (!rails(384)) {
-		lck_mtx_unlock(&dsp_lock);
-		return false;
+	/*
+	 * adsp_rails=0: the DSP started without our request for its rails, on whatever level they are at (miatoll, 30
+	 * October: the phone stopped dead inside that request, at its first time there).
+	 */
+	{
+		uint32_t want = 1;
+
+		PE_parse_boot_argn("adsp_rails", &want, sizeof(want));
+		if (want == 0) {
+			printf("adsp: %u: the rails are not asked for (adsp_rails=0)\n", step);
+		} else if (!rails(384)) {
+			lck_mtx_unlock(&dsp_lock);
+			return false;
+		} else {
+			rails_asked = true;
+		}
 	}
-	rails_asked = true;
 	mark(10);
 	if (!mailbox_send("{class: image, res: load_state, name: adsp, val: on}")) {
-		rails(0);
+		if (rails_asked) {
+			rails(0);
+		}
 		rails_asked = false;
 		lck_mtx_unlock(&dsp_lock);
 		return false;
@@ -1822,7 +1841,9 @@ step_start(void)
 		printf("adsp: %u: TRUSTZONE DOES NOT START THE AUDIO DSP: the call returns %d, its answer is %#llx\n", step, result,
 		    answer);
 		mailbox_send("{class: image, res: load_state, name: adsp, val: off}");
-		rails(0);
+		if (rails_asked) {
+			rails(0);
+		}
 		rails_asked = false;
 		lck_mtx_unlock(&dsp_lock);
 		return false;

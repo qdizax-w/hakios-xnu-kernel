@@ -2542,14 +2542,25 @@ step_start(void)
 	} else if (!rmtfs_buffer_make() || !rmtfs_share(true)) {
 		printf("mpss: %u: THE MODEM GETS NO BUFFER FOR ITS FILES: it is started all the same, and will offer little\n", step);
 	}
-	if (!rails(384)) {
-		lck_mtx_unlock(&dsp_lock);
-		return false;
+	/* modem_rails=0: the modem started without our request for its rails (the audio DSP's stopped the phone there, miatoll) */
+	{
+		uint32_t want = 1;
+
+		PE_parse_boot_argn("modem_rails", &want, sizeof(want));
+		if (want == 0) {
+			printf("mpss: %u: the rails are not asked for (modem_rails=0)\n", step);
+		} else if (!rails(384)) {
+			lck_mtx_unlock(&dsp_lock);
+			return false;
+		} else {
+			rails_asked = true;
+		}
 	}
-	rails_asked = true;
 	hakios_mark(1, 10);
 	if (!mailbox_send("{class: image, res: load_state, name: modem, val: on}")) {
-		rails(0);
+		if (rails_asked) {
+			rails(0);
+		}
 		rails_asked = false;
 		lck_mtx_unlock(&dsp_lock);
 		return false;
@@ -2564,7 +2575,9 @@ step_start(void)
 		printf("mpss: %u: TRUSTZONE DOES NOT START THE MODEM: the call returns %d, its answer is %#llx\n", step, result,
 		    answer);
 		mailbox_send("{class: image, res: load_state, name: modem, val: off}");
-		rails(0);
+		if (rails_asked) {
+			rails(0);
+		}
 		rails_asked = false;
 		lck_mtx_unlock(&dsp_lock);
 		return false;
