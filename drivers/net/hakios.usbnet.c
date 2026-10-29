@@ -728,6 +728,20 @@ ud_own_address(void)
 		ifr.ifr_flags |= IFF_UP;
 		up = sock_ioctl(so, SIOCSIFFLAGS, &ifr);
 	}
+#ifdef SIOCPROTOATTACH
+	/*
+	 * IPv4 attached to the interface first, as iOS's IPConfiguration does it before it gives an address: without
+	 * it the address is refused (the boot of 29 October 23:38 had none, and no log could be read).
+	 */
+	{
+		int attached;
+
+		bzero(&ifr, sizeof(ifr));
+		strlcpy(ifr.ifr_name, "en0", sizeof(ifr.ifr_name));
+		attached = sock_ioctl(so, SIOCPROTOATTACH, &ifr);
+		printf("usbnet: IPv4 attached to en0 (%d)\n", attached);
+	}
+#endif
 	bzero(&ifra, sizeof(ifra));
 	strlcpy(ifra.ifra_name, "en0", sizeof(ifra.ifra_name));
 	sin = (struct sockaddr_in *)&ifra.ifra_addr;
