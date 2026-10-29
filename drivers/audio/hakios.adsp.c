@@ -1646,20 +1646,20 @@ static struct block smem_lock = { "shared memory's lock", 0x01f43000, 0x1000 };
 #define LOCK_OWNER              0x000
 #define LOCK_US                 1u
 
-/* Our item made in the partition, as Linux's qcom_smem_alloc_private() makes one (hakios.wifi.c: our_item_make()). */
+/* An item of ours made in the partition, as Linux's qcom_smem_alloc_private() makes one (hakios.mpss.c: our_item_make()). */
 static bool
-our_item_make(uint32_t partition)
+our_item_make(uint32_t partition, uint32_t item, uint32_t bytes)
 {
 	struct smem_partition header;
 	struct smem_entry entry;
-	const uint32_t item_size = (sizeof(struct smp2p) + 7) & ~7u, need_bytes = sizeof(entry) + item_size;
+	const uint32_t item_size = (bytes + 7) & ~7u, need_bytes = sizeof(entry) + item_size;
 	uint32_t owner = ~0u, at;
 	bool made = false;
 
 	lck_mtx_lock(&hakios_smem_alloc_lock);         /* (the Wi-Fi's start allocates under the same hardware lock) */
 	need(&smem_lock);
 	printf("adsp: %u: about to take the lock (%#x), write an entry for item %u with %u bytes behind it at the partition's mark, "
-	    "move the mark by %u, and release the lock\n", step, smem_lock.phys + LOCK_OWNER, ITEM_SMP2P_OURS, item_size, need_bytes);
+	    "move the mark by %u, and release the lock\n", step, smem_lock.phys + LOCK_OWNER, item, item_size, need_bytes);
 	snprintf(last_write, sizeof(last_write), "step %u took the shared memory's lock", step);
 	for (uint32_t ms = 0; ms <= 1000; ms++) {
 		wr(smem_lock.base + LOCK_OWNER, LOCK_US);
@@ -1680,7 +1680,7 @@ our_item_make(uint32_t partition)
 		goto out;
 	}
 	for (at = sizeof(header); at < header.free_uncached;) {
-		if (!smem_peek(partition + at, &entry, sizeof(entry)) || entry.canary != SMEM_CANARY || entry.item == ITEM_SMP2P_OURS ||
+		if (!smem_peek(partition + at, &entry, sizeof(entry)) || entry.canary != SMEM_CANARY || entry.item == item ||
 		    entry.size > header.size) {
 			break;
 		}
@@ -1695,9 +1695,9 @@ our_item_make(uint32_t partition)
 		printf("adsp: %u: no room: %u bytes wanted, %u free: nothing is written\n", step, need_bytes, header.free_cached - at);
 		goto out;
 	}
-	smem_poke(partition + at, SMEM_CANARY | ITEM_SMP2P_OURS << 16);
+	smem_poke(partition + at, SMEM_CANARY | item << 16);
 	smem_poke(partition + at + 4, item_size);
-	smem_poke(partition + at + 8, item_size - (uint32_t)sizeof(struct smp2p));
+	smem_poke(partition + at + 8, item_size - bytes);
 	smem_poke(partition + at + 12, 0);
 	settle();
 	smem_poke(partition + __offsetof(struct smem_partition, free_uncached), at + need_bytes);
@@ -1730,7 +1730,7 @@ step_our_item(void)
 		printf("adsp: %u: item %u is there, at %#lx: a kernel before this one made it, and it is used again\n", step,
 		    ITEM_SMP2P_OURS, SMEM_PHYS + our_item);
 	} else {
-		if (!our_item_make(partition)) {
+		if (!our_item_make(partition, ITEM_SMP2P_OURS, sizeof(struct smp2p))) {
 			return false;
 		}
 		our_item = our_item_find();
@@ -1810,7 +1810,11 @@ step_start(void)
 	 * October: the phone stopped dead inside that request, at its first time there).
 	 */
 	{
-		uint32_t want = 1;
+		/*
+		 * (on miatoll not asked for unless adsp_rails=1: its DSPs ask for their own power at once, bit 2 of "slave-kernel"
+		 * 25 to 160 ms after the start, and our request stopped the phone dead at its first time; 30 October)
+		 */
+		uint32_t want = bells_apcs ? 0 : 1;
 
 		PE_parse_boot_argn("adsp_rails", &want, sizeof(want));
 		if (want == 0) {
@@ -2498,6 +2502,136 @@ qrtr_out_packet(uint32_t type, uint32_t from_port, uint32_t to_node, uint32_t to
 	return error;
 }
 
+/*
+ * The service registry's locator (Linux's pd-mapper, QMI service 64), for the DSP: on miatoll (SM7125) the audio services
+ * live in a protection domain of their own, msm/adsp/audio_pd, and the DSP asks the application processor where the
+ * domains are before it brings them up. Answered from this phone's own registry files (adspr.jsn, adsps.jsn, adspua.jsn
+ * beside its firmware), as hakios.mpss.c answers the modem from the modem's.
+ */
+#define SERVREG_SERVICE         64
+#define SERVREG_INSTANCE        257             /* what pd-mapper publishes: version 1, instance 1 */
+#define SERVREG_PORT            0x4040u         /* our port for it */
+#define SERVREG_GET_DOMAIN_LIST 0x21
+#define SERVREG_PFR             0x24
+#define QMI_REQUEST             0
+#define QMI_RESPONSE            2
+
+static const struct {
+	const char *service, *domain;
+	uint32_t instance;
+} servreg_map[] = {
+	{ "tms/servreg", "msm/adsp/root_pd", 74 }, { "tms/servreg", "msm/adsp/sensor_pd", 74 },
+	{ "tms/servreg", "msm/adsp/audio_pd", 74 }, { "avs/audio", "msm/adsp/audio_pd", 74 },
+};
+static uint32_t servreg_requests;
+
+static const uint8_t *
+qmi_tlv(const uint8_t *m, size_t length, uint8_t type, uint16_t *size)
+{
+	for (size_t at = 7; at + 3 <= length;) {
+		uint16_t n = (uint16_t)(m[at + 1] | m[at + 2] << 8);
+
+		if (at + 3 + n > length) {
+			return NULL;
+		}
+		if (m[at] == type) {
+			*size = n;
+			return m + at + 3;
+		}
+		at += 3 + n;
+	}
+	return NULL;
+}
+
+/* A request to our locator: where a service is (its domains and their instance), or a domain's failure noted. From the link's thread. */
+static void
+servreg_receive(uint32_t node, uint32_t port, const uint8_t *m, size_t length)
+{
+	const uint8_t *value;
+	uint8_t answer[512];
+	uint16_t message, size = 0;
+	unsigned at = 7 + 7, found = 0;
+	char wanted[64] = "";
+
+	if (length < 7 || m[0] != QMI_REQUEST) {
+		return;
+	}
+	message = (uint16_t)(m[3] | m[4] << 8);
+	servreg_requests++;
+	bzero(answer, sizeof(answer));
+	answer[0] = QMI_RESPONSE;
+	answer[1] = m[1];
+	answer[2] = m[2];
+	answer[3] = m[3];
+	answer[4] = m[4];
+	answer[7] = 2;                          /* result: success */
+	answer[8] = 4;
+	if (message == SERVREG_GET_DOMAIN_LIST) {
+		value = qmi_tlv(m, length, 1, &size);
+		if (value != NULL) {
+			snprintf(wanted, sizeof(wanted), "%.*s", (int)(size < 63 ? size : 63), (const char *)value);
+		}
+		for (unsigned i = 0; i < sizeof(servreg_map) / sizeof(servreg_map[0]); i++) {
+			found += strcmp(servreg_map[i].service, wanted) == 0;
+		}
+		/* TLV 0x10: how many domains in all; 0x11: the table's revision; 0x12: the list, each a string with a byte of
+		 * length, the instance (4 bytes), and the service data (a byte of validity, 4 bytes) -- as hakios.mpss.c's */
+		answer[at++] = 0x10;
+		answer[at++] = 2;
+		answer[at++] = 0;
+		answer[at++] = (uint8_t)found;
+		answer[at++] = (uint8_t)(found >> 8);
+		answer[at++] = 0x11;
+		answer[at++] = 2;
+		answer[at++] = 0;
+		answer[at++] = 1;
+		answer[at++] = 0;
+		if (found != 0) {
+			unsigned list = at;
+
+			answer[at++] = 0x12;
+			at += 2;
+			answer[at++] = (uint8_t)found;
+			for (unsigned i = 0; i < sizeof(servreg_map) / sizeof(servreg_map[0]) && at + 64 < sizeof(answer); i++) {
+				if (strcmp(servreg_map[i].service, wanted) != 0) {
+					continue;
+				}
+				answer[at++] = (uint8_t)strlen(servreg_map[i].domain);
+				memcpy(answer + at, servreg_map[i].domain, strlen(servreg_map[i].domain));
+				at += (unsigned)strlen(servreg_map[i].domain);
+				for (unsigned b = 0; b < 4; b++) {
+					answer[at++] = (uint8_t)(servreg_map[i].instance >> (8 * b));
+				}
+				answer[at++] = 0;       /* no service data */
+				at += 4;
+			}
+			answer[list + 1] = (uint8_t)(at - list - 3);
+			answer[list + 2] = (uint8_t)((at - list - 3) >> 8);
+		}
+		printf("adsp: servreg: the DSP asks where \"%s\" is: %u domain%s\n", wanted, found, found == 1 ? "" : "s");
+	} else if (message == SERVREG_PFR) {
+		value = qmi_tlv(m, length, 1, &size);
+		printf("adsp: servreg: the DSP reports a failure of \"%.*s\"\n", value ? (int)(size < 63 ? size : 63) : 0,
+		    value ? (const char *)value : "");
+	} else {
+		printf("adsp: servreg: a request this does not know (%#x)\n", message);
+		answer[10] = 1;                 /* failure */
+		answer[12] = 0x1;               /* malformed */
+	}
+	answer[5] = (uint8_t)(at - 7);
+	answer[6] = (uint8_t)((at - 7) >> 8);
+	qrtr_out_packet(QRTR_DATA, SERVREG_PORT, node, port, answer, at);
+}
+
+/* Our locator told of: to `node' and `port' (a lookup's asker, or the DSP's control port after its hello) */
+static void
+servreg_announce(uint32_t node, uint32_t port)
+{
+	struct qrtr_control server = { .command = QRTR_NEW_SERVER, .words = { SERVREG_SERVICE, SERVREG_INSTANCE, QRTR_US, SERVREG_PORT } };
+
+	qrtr_out_packet(QRTR_NEW_SERVER, QRTR_CONTROL, node, port, &server, sizeof(server));
+}
+
 static void
 qrtr_control(const struct qrtr_header *header, const struct qrtr_control *control)
 {
@@ -2511,6 +2645,7 @@ qrtr_control(const struct qrtr_header *header, const struct qrtr_control *contro
 		}
 		error = qrtr_out_packet(QRTR_HELLO, QRTR_CONTROL, header->from_node, QRTR_CONTROL, &hello, sizeof(hello));
 		printf("adsp: qrtr: HELLO FROM NODE %u; ours to it: %s\n", header->from_node, error == 0 ? "SENT" : "NOT SENT");
+		servreg_announce(header->from_node, QRTR_CONTROL);
 		break;
 	case QRTR_NEW_SERVER:
 		for (unsigned i = 0; i < sizeof(qrtr_servers) / sizeof(qrtr_servers[0]); i++) {
@@ -2540,13 +2675,24 @@ qrtr_control(const struct qrtr_header *header, const struct qrtr_control *contro
 			}
 		}
 		break;
-	case QRTR_NEW_LOOKUP:
-		/* the DSP looks for a service of ours (a protection domain's locator, say): there are none yet */
+	case QRTR_NEW_LOOKUP: {
+		/*
+		 * The DSP looks for a service of ours: the locator (64) is told of if that is it or if any is asked for, and the list
+		 * ends with a server of all zeroes, as Linux's name service answers (net/qrtr/ns.c, ctrl_cmd_new_lookup()).
+		 */
+		struct qrtr_control end = { .command = QRTR_NEW_SERVER };
+		bool ours = control->words[0] == SERVREG_SERVICE || control->words[0] == 0;
+
 		if (qrtr_lookups++ < 16) {
-			printf("adsp: qrtr: the DSP looks for service %u (%#x), instance %u: nobody here offers it\n", control->words[0],
-			    control->words[0], control->words[1]);
+			printf("adsp: qrtr: the DSP looks for service %u (%#x), instance %u: %s\n", control->words[0], control->words[0],
+			    control->words[1], ours ? "the service registry's locator is here" : "nobody here offers it");
 		}
+		if (ours) {
+			servreg_announce(header->from_node, header->from_port);
+		}
+		qrtr_out_packet(QRTR_NEW_SERVER, QRTR_CONTROL, header->from_node, header->from_port, &end, sizeof(end));
 		break;
+	}
 	case QRTR_BYE:
 		printf("adsp: qrtr: BYE from node %u\n", header->from_node);
 		bzero(qrtr_servers, sizeof(qrtr_servers));
@@ -2604,6 +2750,10 @@ qrtr_input(const uint8_t *data, uint32_t length)
 
 		memcpy(&control, data + at, header.size < sizeof(control) ? header.size : sizeof(control));
 		qrtr_control(&header, &control);
+		return;
+	}
+	if (header.to_port == SERVREG_PORT) {
+		servreg_receive(header.from_node, header.from_port, data + at, header.size);
 		return;
 	}
 	printf("adsp: qrtr: a datagram of %u bytes from node %u port %u to our port %u: nobody here listens there\n", header.size,
@@ -3144,6 +3294,19 @@ step_queues(void)
 	uint32_t head, tail;
 
 	announce("find GLINK's descriptor and the two queues, and read what the audio DSP has put into its own");
+	if (!glink_find() && glink.descriptor != 0 && glink.theirs != 0 && glink.ours == 0) {
+		/*
+		 * Our queue is ours to make, as Linux's qcom_glink_smem_register() makes it (SMEM_GLINK_NATIVE_XPRT_FIFO_0, 16 KB):
+		 * miatoll's DSP makes the descriptor and its own queue and leaves ours to us.
+		 */
+		uint32_t cacheline = 0, size = 0, partition = smem_partition(SMEM_US, SMEM_ADSP, &cacheline, &size);
+
+		printf("adsp: %u: the DSP has made GLINK's descriptor and its queue; ours (item %u) is ours to make\n", step,
+		    ITEM_GLINK_OUR_QUEUE);
+		if (partition == 0 || !our_item_make(partition, ITEM_GLINK_OUR_QUEUE, 16384)) {
+			return false;
+		}
+	}
 	if (!glink_find()) {
 		printf("adsp: %u: GLINK's items are not all there, or not of a shape this knows (descriptor %#x, ours %#x of %u bytes, "
 		    "the DSP's %#x of %u)\n", step, glink.descriptor, glink.ours, glink.ours_size, glink.theirs, glink.theirs_size);

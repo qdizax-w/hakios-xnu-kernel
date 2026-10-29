@@ -2544,7 +2544,11 @@ step_start(void)
 	}
 	/* modem_rails=0: the modem started without our request for its rails (the audio DSP's stopped the phone there, miatoll) */
 	{
-		uint32_t want = 1;
+		/*
+		 * (on miatoll not asked for unless modem_rails=1: its DSPs ask for their own power at once, bit 2 of "slave-kernel"
+		 * 25 to 160 ms after the start, and our request stopped the phone dead at its first time; 30 October)
+		 */
+		uint32_t want = bells_apcs ? 0 : 1;
 
 		PE_parse_boot_argn("modem_rails", &want, sizeof(want));
 		if (want == 0) {
@@ -3689,6 +3693,20 @@ static struct {
 static struct hakios_qrtr_port *rmtfs_port;
 static vm_offset_t rmtfs_buffer;                /* the buffer, as this kernel sees it; 0: none yet */
 static volatile uint8_t *rmtfs_window;          /* ... and the uncached one it is used through */
+static bool rmtfs_cached;                       /* miatoll: the window is this kernel's own cached memory (rmtfs_sync()) */
+
+/* The window's bytes [at, at + bytes) written back and thrown out of the caches: the modem sees what we wrote, we what it wrote */
+static void
+rmtfs_sync(uint64_t at, uint64_t bytes)
+{
+	if (!rmtfs_cached || rmtfs_window == NULL) {
+		return;
+	}
+	for (vm_offset_t line = ((vm_offset_t)rmtfs_window + at) & ~63ul; line < (vm_offset_t)rmtfs_window + at + bytes; line += 64) {
+		__asm__ volatile ("dc civac, %0" : : "r" (line));
+	}
+	__asm__ volatile ("dsb sy" ::: "memory");
+}
 static uint64_t rmtfs_buffer_pa;
 static bool rmtfs_shared;                       /* the modem has been let into it */
 
@@ -3744,10 +3762,33 @@ rmtfs_buffer_make(void)
 	if (rmtfs_window != NULL) {
 		return true;
 	}
-	/* miatoll: the POCO's 0x9c700000 is inside this phone's framebuffer (cont_splash 0x9c000000, 23 MB): its compute DSP's reserved memory instead (dt: cdsp_regions@8f300000, 30 MB; not started here either) */
-	rmtfs_buffer_pa = bells_apcs ? 0x8f300000ull : RMTFS_BUFFER_PA_DEFAULT;
-	PE_parse_boot_argn("modem_buffer", &rmtfs_buffer_pa, sizeof(rmtfs_buffer_pa));      /* (another region, to try) */
-	rmtfs_window = (volatile uint8_t *)ml_io_map_unmappable((vm_offset_t)rmtfs_buffer_pa, RMTFS_BUFFER_SIZE, VM_WIMG_WCOMB);
+	rmtfs_buffer_pa = RMTFS_BUFFER_PA_DEFAULT;
+	if (bells_apcs) {
+		/*
+		 * miatoll: memory of this kernel's own, as Android takes its buffer (dt: qcom,rmtfs_sharedmem@0, reg 0: allocated
+		 * at run time): the POCO's 0x9c700000 is inside this phone's framebuffer, and its compute DSP's reserved memory
+		 * (0x8f300000) is not HLOS's to give, TrustZone said (-2). Physically contiguous, used through its own cached view
+		 * with the caches written back and emptied around every transfer (rmtfs_sync()): a second, uncached mapping of a
+		 * page this kernel manages is not made.
+		 */
+		vm_offset_t own = 0;
+
+		if (kmem_alloc_contig(kernel_map, &own, RMTFS_BUFFER_SIZE, PAGE_MASK, 0, 0, KMA_KOBJECT | KMA_ZERO | KMA_DATA,
+		    VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS || own == 0) {
+			printf("mpss: %u: no %u bytes of contiguous memory for the modem's buffer\n", step, RMTFS_BUFFER_SIZE);
+			return false;
+		}
+		for (vm_offset_t line = own; line < own + RMTFS_BUFFER_SIZE; line += 64) {
+			__asm__ volatile ("dc civac, %0" : : "r" (line));
+		}
+		__asm__ volatile ("dsb sy" ::: "memory");
+		rmtfs_buffer_pa = kvtophys(own);
+		rmtfs_window = (volatile uint8_t *)own;
+		rmtfs_cached = true;
+	} else {
+		PE_parse_boot_argn("modem_buffer", &rmtfs_buffer_pa, sizeof(rmtfs_buffer_pa));      /* (another region, to try) */
+		rmtfs_window = (volatile uint8_t *)ml_io_map_unmappable((vm_offset_t)rmtfs_buffer_pa, RMTFS_BUFFER_SIZE, VM_WIMG_WCOMB);
+	}
 	if (rmtfs_window == NULL) {
 		printf("mpss: %u: the modem's buffer at %#llx cannot be mapped\n", step, rmtfs_buffer_pa);
 		return false;
@@ -3756,9 +3797,10 @@ rmtfs_buffer_make(void)
 	for (uint32_t i = 0; i < RMTFS_BUFFER_SIZE; i += 8) {
 		*(volatile uint64_t *)(rmtfs_window + i) = 0;
 	}
+	rmtfs_sync(0, RMTFS_BUFFER_SIZE);
 	settle();
-	printf("mpss: %u: the modem's buffer: %u bytes at %#llx (the compute DSP's memory, unused here)\n", step, RMTFS_BUFFER_SIZE,
-	    rmtfs_buffer_pa);
+	printf("mpss: %u: the modem's buffer: %u bytes at %#llx%s\n", step, RMTFS_BUFFER_SIZE, rmtfs_buffer_pa,
+	    rmtfs_cached ? " (this kernel's own memory)" : "");
 	return true;
 }
 
@@ -4002,6 +4044,7 @@ rmtfs_receive(__unused void *context, uint32_t node, uint32_t port, const void *
 				break;
 			}
 			if (write) {
+				rmtfs_sync(physical - rmtfs_buffer_pa, bytes);
 				for (uint64_t i = 0; i < bytes; i++) {
 					rmtfs_files[file].data[sector * RMTFS_SECTOR + i] = rmtfs_window[physical - rmtfs_buffer_pa + i];
 				}
@@ -4010,6 +4053,7 @@ rmtfs_receive(__unused void *context, uint32_t node, uint32_t port, const void *
 				for (uint64_t i = 0; i < bytes; i++) {
 					rmtfs_window[physical - rmtfs_buffer_pa + i] = rmtfs_files[file].data[sector * RMTFS_SECTOR + i];
 				}
+				rmtfs_sync(physical - rmtfs_buffer_pa, bytes);
 				rmtfs_sectors_read += sectors;
 			}
 		}
@@ -5116,6 +5160,19 @@ step_queues(void)
 	uint32_t head, tail;
 
 	announce("find GLINK's descriptor and the two queues, and read what the modem has put into its own");
+	if (!glink_find() && glink.descriptor != 0 && glink.theirs != 0 && glink.ours == 0) {
+		/*
+		 * Our queue is ours to make, as Linux's qcom_glink_smem_register() makes it (SMEM_GLINK_NATIVE_XPRT_FIFO_0, 16 KB):
+		 * miatoll's modem makes the descriptor and its own queue and leaves ours to us.
+		 */
+		uint32_t cacheline = 0, size = 0, partition = smem_partition(SMEM_US, SMEM_MPSS, &cacheline, &size);
+
+		printf("mpss: %u: the modem has made GLINK's descriptor and its queue; ours (item %u) is ours to make\n", step,
+		    ITEM_GLINK_OUR_QUEUE);
+		if (partition == 0 || !our_item_make(partition, ITEM_GLINK_OUR_QUEUE, 16384)) {
+			return false;
+		}
+	}
 	if (!glink_find()) {
 		printf("mpss: %u: GLINK's items are not all there, or not of a shape this knows (descriptor %#x, ours %#x of %u bytes, "
 		    "the DSP's %#x of %u)\n", step, glink.descriptor, glink.ours, glink.ours_size, glink.theirs, glink.theirs_size);
