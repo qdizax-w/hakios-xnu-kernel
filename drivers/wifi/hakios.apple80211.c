@@ -314,10 +314,10 @@ get(struct apple80211req *request)
 		}
 		return give(request, bits, sizeof(bits));
 	}
-	case 19: {                              /* the radio's power: one radio. Until the driver is up it counts as on: it */
-		struct {                        /* is being brought up, and iOS asks this once, early */
+	case 19: {                              /* the radio's power: one radio. Until the driver is up it is what iOS last */
+		struct {                        /* asked for, on to begin with: it is being brought up, and iOS asks this early */
 			uint32_t version, radios, state[4];
-		} answer = { .version = 1, .radios = 1, .state = { !hakios_sta_present() || hakios_sta_powered() } };
+		} answer = { .version = 1, .radios = 1, .state = { hakios_sta_powered() } };
 
 		return give(request, &answer, sizeof(answer));
 	}

@@ -41,6 +41,7 @@ static bool sta_thread_made;
 static bool sta_calls;                          /* the thread is in a call of the station side's */
 static unsigned sta_reads;                      /* ... and so many others are in its state() */
 static bool sta_on;                             /* the radio's power, as last asked for */
+static bool sta_wanted_off;                     /* iOS has asked for the radio off (also before there was a station) */
 
 /* what has been asked for and not begun */
 static bool asked_power, asked_power_on, asked_scan, asked_join, asked_leave;
@@ -193,10 +194,15 @@ hakios_sta_attach(const struct hakios_sta_ops *ops)
 	channel_count = ops->channels(channels, CHANNELS_MOST);
 	lck_mtx_lock(&sta_lock);
 	sta_ops = ops;
-	sta_on = true;
+	sta_on = true;                          /* (the station comes up on) ... */
+	if (sta_wanted_off) {                   /* ... and is turned off at once if iOS asked for that before it was there */
+		sta_on = false;
+		asked_power = true;
+		asked_power_on = false;
+	}
 	lck_mtx_unlock(&sta_lock);
 	thread_wakeup((event_t)&sta_ops);
-	hakios_apple80211_event(HAKIOS_STA_POWER, 1);
+	hakios_apple80211_event(HAKIOS_STA_POWER, !sta_wanted_off);
 }
 
 void
@@ -213,10 +219,11 @@ hakios_sta_present(void)
 	return sta_ops != NULL;
 }
 
+/* With no station yet (the radio is being brought up, or did not come up) it is what iOS last asked for: on to begin with. */
 bool
 hakios_sta_powered(void)
 {
-	return sta_ops != NULL && sta_on;
+	return sta_ops != NULL ? sta_on : !sta_wanted_off;
 }
 
 bool
@@ -234,9 +241,15 @@ int
 hakios_sta_ask_power(bool on)
 {
 	lck_mtx_lock(&sta_lock);
+	sta_wanted_off = !on;
 	if (sta_ops == NULL) {
+		/*
+		 * No station yet: what is asked is kept, and done when there is one (hakios_sta_attach()). The switch in Settings
+		 * moves meanwhile -- refused, it stood "on" for good over a radio that had not come up (miatoll, 30 October).
+		 */
 		lck_mtx_unlock(&sta_lock);
-		return ENXIO;
+		hakios_apple80211_event(HAKIOS_STA_POWER, on);
+		return 0;
 	}
 	sta_on = on;
 	asked_power = true;
