@@ -12,6 +12,9 @@
 #include <linux/ieee80211.h>
 #include <net/cfg80211.h>
 
+/* --- a lock guard ath10k's wmi-tlv.c takes (guard(spinlock_bh)) that LinuxKPI's spinlock.h does not define */
+DEFINE_LOCK_GUARD_1(spinlock_bh, spinlock_t, spin_lock_bh(_T->lock), spin_unlock_bh(_T->lock))
+
 /* --- interrupts: how the line is triggered is the kernel's knowledge, not the driver's */
 #define IRQF_TRIGGER_RISING	0x0001
 #define IRQ_NOAUTOEN		(1 << 12)	/* request_irq() leaves the interrupt disabled */
