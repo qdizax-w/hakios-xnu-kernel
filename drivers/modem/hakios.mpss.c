@@ -6205,6 +6205,14 @@ step_nas(void)
 		return false;
 	}
 	PE_parse_boot_argn("modem_nas_wait", &wait_seconds, sizeof(wait_seconds));
+	/*
+	 * (miatoll: not online unless modem_online=1. Online, it saw the network (-65 dBm, UMTS) and a minute later gave up:
+	 * "dog_hb.c:367: Task starvation: ims" -- its voice-over-LTE task, which nothing here serves. Its Wi-Fi runs in low
+	 * power as well, and that is what it is up for here; 30 October.)
+	 */
+	if (bells_apcs) {
+		online = 0;
+	}
 	PE_parse_boot_argn("modem_online", &online, sizeof(online));
 	PE_parse_boot_argn("modem_data_wait", &data_wait, sizeof(data_wait));
 	announce("look the modem's services up as they come (they take some 30 s): DMS asked to put the modem online as soon as it is "
