@@ -543,6 +543,8 @@ lx_start(void)
 	radio_device.name = "18800000.wifi";
 	radio_device.dev.of_node = &node;
 	radio_device.dev.kobj.name = "wifi";
+	/* (LinuxKPI's dma_set_mask() wants the busdma state FreeBSD's bus would have made; the radio's memory is the pool's) */
+	radio_device.dev.dma_priv = &bus;
 	radio_device.resource = radio_registers;
 	radio_device.num_resources = ARRAY_SIZE(radio_registers);
 	radio_device.irqs = radio_irqs;
