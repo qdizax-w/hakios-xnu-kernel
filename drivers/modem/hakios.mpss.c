@@ -3773,7 +3773,9 @@ rmtfs_buffer_make(void)
 		 */
 		vm_offset_t own = 0;
 
-		if (kmem_alloc_contig(kernel_map, &own, RMTFS_BUFFER_SIZE, PAGE_MASK, 0, 0, KMA_KOBJECT | KMA_ZERO | KMA_DATA,
+		/* (below 4 GB: the modem gives the buffer's addresses in 32 bits; one above was read at its low half, 30 October) */
+		if (kmem_alloc_contig(kernel_map, &own, RMTFS_BUFFER_SIZE, PAGE_MASK, (ppnum_t)((0x100000000ull >> PAGE_SHIFT) - 1), 0,
+		    KMA_KOBJECT | KMA_ZERO | KMA_DATA,
 		    VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS || own == 0) {
 			printf("mpss: %u: no %u bytes of contiguous memory for the modem's buffer\n", step, RMTFS_BUFFER_SIZE);
 			return false;
