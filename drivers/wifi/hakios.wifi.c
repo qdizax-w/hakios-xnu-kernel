@@ -4393,6 +4393,7 @@ whole_thread(__unused void *parameter, __unused wait_result_t result)
  */
 #define MIATOLL_SOC_BASE        0x00100000ul    /* the loader's "miatoll" */
 #define MIATOLL_RADIO_STREAM    0x00c0
+#define MIATOLL_RADIO_MEMORY    (44ul << 20)    /* the layer's pool (wifi/lx/src/lx_base.c: POOL_SIZE), taken at the start */
 
 /*
  * ath10k's "firmware-N.bin" for this chip holds no firmware -- the WCN3990's is the modem's -- only what the driver is to
@@ -4506,6 +4507,7 @@ miatoll_init(void)
 	quiet = loud == 0;
 	pause_ms = watch_seconds = 0;
 	new_from = STEPS + 1;
+	hakios_lx_keep(MIATOLL_RADIO_MEMORY);
 	hakios_lx_net_early();
 	tell("wifi: the radio is brought up when the modem's Wi-Fi firmware says it is ready (wifi=1)\n");
 }

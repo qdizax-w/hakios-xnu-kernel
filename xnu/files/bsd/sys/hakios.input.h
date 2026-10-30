@@ -101,6 +101,7 @@ int hakios_lx_start(void);             /* the driver brought up on the radio as 
 void hakios_lx_stop(void);             /* ... and down again, if it stayed up (a network joined) */
 int hakios_lx_prepare(void);           /* before all that: the memory the radio will be shown, taken; 0 or an errno */
 void hakios_lx_net_early(void);        /* ... and en0 made on the radio now, if the kernel was given its address */
+void hakios_lx_keep(unsigned long size); /* ... the radio's memory in one piece, taken early for a radio brought up later */
 /* the modem's Wi-Fi firmware has said it is ready (hakios.mpss.c): true if the radio's driver takes it from there */
 bool hakios_wifi_modem_firmware_ready(void);
 /* the SoC's serial number, from the modem's shared memory (hakios.mpss.c): false if there is none */

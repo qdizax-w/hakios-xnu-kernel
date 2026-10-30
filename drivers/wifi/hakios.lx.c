@@ -60,6 +60,27 @@ lx_os_free(void *memory, unsigned long size)
  * in between (as hakios.adreno.c does with what it shares with the GPU); the first, cached
  * view is written out and never used again.
  */
+/*
+ * The memory in one piece, taken while the system starts and a piece that big is easy to find, for a radio that is
+ * brought up later (miatoll: after the modem, a minute in, when 44 MB in one piece were no longer there). Only taken
+ * here: it is shown to the radio when the driver asks for it.
+ */
+static vm_offset_t lx_kept;
+static unsigned long lx_kept_size;
+
+void
+hakios_lx_keep(unsigned long size)
+{
+	size = round_page(size);
+	if (lx_kept == 0 && kmem_alloc_contig(kernel_map, &lx_kept, size, 0, 0, 0, KMA_KOBJECT | KMA_ZERO | KMA_DATA,
+	    VM_KERN_MEMORY_IOKIT) == KERN_SUCCESS) {
+		lx_kept_size = size;
+		say("lx: %lu MB in one piece kept for the radio\n", size >> 20);
+	} else if (lx_kept == 0) {
+		say("lx: NO %lu MB IN ONE PIECE for the radio, even now\n", size >> 20);
+	}
+}
+
 void *
 lx_os_radio_memory(unsigned long size, unsigned long long *address)
 {
@@ -67,7 +88,10 @@ lx_os_radio_memory(unsigned long size, unsigned long long *address)
 	uint64_t physical;
 
 	size = round_page(size);
-	if (kmem_alloc_contig(kernel_map, &cached, size, 0, 0, 0, KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) !=
+	if (lx_kept != 0 && size <= lx_kept_size) {
+		cached = lx_kept;               /* (the rest of it, if any, is not given out again) */
+		lx_kept = 0;
+	} else if (kmem_alloc_contig(kernel_map, &cached, size, 0, 0, 0, KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) !=
 	    KERN_SUCCESS) {
 		say("lx: no %lu bytes of memory in one piece\n", size);
 		return NULL;
