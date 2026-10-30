@@ -1857,7 +1857,11 @@ step_our_item(void)
 	 * (modem_ipa_item=0: not; our SMMU context maps all of DDR, so the item needs no mapping of its own).
 	 */
 	{
-		uint32_t ipa_item = 497, ipa_size = 0;
+		/*
+		 * (not on miatoll: its device tree has no qcom,ipa-q6-smem-size, Android's IPA 4.2 driver makes no such item, and
+		 * the modem allocates it itself -- it gave up when it found ours there: "ipa_ipfltr.c:441: IPA_SMEM_ALLOC_EX failed")
+		 */
+		uint32_t ipa_item = bells_apcs ? 0 : 497, ipa_size = 0;
 
 		PE_parse_boot_argn("modem_ipa_item", &ipa_item, sizeof(ipa_item));
 		if (ipa_item != 0) {
