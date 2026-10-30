@@ -5159,6 +5159,334 @@ ipa_qmi_stop(void)
 	ipa_modem_node = ipa_modem_port = 0;
 }
 
+/* ---- the Wi-Fi firmware's service (WLFW), on miatoll, whose WCN3990 runs in the modem ----------------- */
+
+/*
+ * miatoll's Wi-Fi (a WCN3990) is driven by firmware the modem loads into its own Wi-Fi domain (msm/modem/wlan_pd, from
+ * wlanmdsp.mbn over TFTP), and that firmware offers QMI service 69 (WLFW) on the modem's node once it runs. Before the
+ * radio can be used, the host has an exchange with it, which Linux's ath10k makes in its qmi.c
+ * (ath10k_qmi_event_server_arrive() and ath10k_qmi_event_msa_ready()): it registers for the indications "firmware ready"
+ * and "MSA ready", says what the host can do, tells the firmware where its memory (the MSA, reserved-memory
+ * wlan_fw_region@93900000, 2 MB: dt qcom,wlan-msa-fixed-region) is and that it is ready -- miatoll's tree says
+ * qcom,hyp_disabled, so no TrustZone assignment of it --, asks what the chip and its board are, sends the board's data file,
+ * and reports the calibrations it has (none). The firmware then says "ready", and the radio's own driver (ath10k's
+ * snoc.c: the copy engines at 0x18800000) is what comes next. The messages are made here by hand from the layout of
+ * Linux's qmi_wlfw_v01.c (message ids, TLV numbers, field sizes); nothing of its text is in this file.
+ *
+ * wlfw=0: not done. It runs on a thread of its own, from when the modem's QRTR is up, and waits for the service.
+ */
+#define WLFW_SERVICE            69
+#define WLFW_IND_REGISTER       0x0020
+#define WLFW_FW_READY_IND       0x0021
+#define WLFW_CAP                0x0024
+#define WLFW_BDF_DOWNLOAD       0x0025
+#define WLFW_CAL_REPORT         0x0026
+#define WLFW_MSA_READY_IND      0x002b
+#define WLFW_MSA_INFO           0x002d
+#define WLFW_MSA_READY          0x002e
+#define WLFW_HOST_CAP           0x0034
+#define WLFW_CLIENT_ID          0x4b4e454cu     /* ath10k's ATH10K_QMI_CLIENT_ID: "LENK" */
+#define WLFW_MSA_PA             0x93900000ull
+#define WLFW_MSA_SIZE           0x00200000u
+#define WLFW_BDF_PIECE          6144            /* QMI_WLFW_MAX_DATA_SIZE_V01 */
+
+static struct hakios_qrtr_port *wlfw_port;
+static volatile uint32_t wlfw_node, wlfw_service_port;
+static volatile bool wlfw_there, wlfw_fw_ready, wlfw_msa_ready;
+static uint16_t wlfw_transaction;
+static uint8_t wlfw_answer[1024];
+static volatile uint32_t wlfw_answer_length;
+static volatile uint16_t wlfw_waiting;          /* the transaction an answer is waited for; 0: none */
+
+static void
+wlfw_receive(__unused void *context, uint32_t node, uint32_t port, const void *data, size_t length)
+{
+	const uint8_t *m = data;
+	uint16_t message;
+
+	if (length < 7 || node != wlfw_node || port != wlfw_service_port) {
+		return;
+	}
+	message = (uint16_t)(m[3] | m[4] << 8);
+	if (m[0] == QMI_INDICATION) {
+		if (message == WLFW_FW_READY_IND) {
+			wlfw_fw_ready = true;
+			printf("mpss: wlfw: THE WI-FI FIRMWARE SAYS IT IS READY\n");
+		} else if (message == WLFW_MSA_READY_IND) {
+			wlfw_msa_ready = true;
+			printf("mpss: wlfw: the firmware says its memory is ready\n");
+		} else {
+			printf("mpss: wlfw: an indication %#x, %u bytes\n", message, (unsigned)length);
+		}
+		return;
+	}
+	if (m[0] == QMI_RESPONSE && wlfw_waiting != 0 && (uint16_t)(m[1] | m[2] << 8) == wlfw_waiting) {
+		uint32_t n = length < sizeof(wlfw_answer) ? (uint32_t)length : (uint32_t)sizeof(wlfw_answer);
+
+		memcpy(wlfw_answer, m, n);
+		wlfw_answer_length = n;
+		__asm__ volatile ("dmb ish" ::: "memory");
+		wlfw_waiting = 0;
+	}
+}
+
+static void
+wlfw_server(__unused void *context, bool arrived, uint32_t service, __unused uint32_t version, __unused uint32_t instance,
+    uint32_t node, uint32_t port)
+{
+	if (service != WLFW_SERVICE) {
+		return;
+	}
+	if (arrived) {
+		wlfw_node = node;
+		wlfw_service_port = port;
+		wlfw_there = true;
+	} else {
+		wlfw_there = false;
+		printf("mpss: wlfw: the Wi-Fi firmware's service has gone\n");
+	}
+}
+
+/* One request, its answer waited for (5 s); true if it came with result 0. The answer stays in wlfw_answer. */
+static bool
+wlfw_ask(const char *what, uint16_t message, const uint8_t *tlvs, uint32_t length)
+{
+	uint8_t *packet = kalloc_data(7 + length, Z_WAITOK | Z_ZERO);
+	uint16_t result = 1, error = 0, size = 0;
+	const uint8_t *value;
+	bool ok = false;
+
+	if (packet == NULL) {
+		return false;
+	}
+	wlfw_transaction = (uint16_t)(wlfw_transaction + 1 == 0 ? 1 : wlfw_transaction + 1);
+	packet[0] = QMI_REQUEST;
+	packet[1] = (uint8_t)wlfw_transaction;
+	packet[2] = (uint8_t)(wlfw_transaction >> 8);
+	packet[3] = (uint8_t)message;
+	packet[4] = (uint8_t)(message >> 8);
+	packet[5] = (uint8_t)length;
+	packet[6] = (uint8_t)(length >> 8);
+	if (length != 0) {
+		memcpy(packet + 7, tlvs, length);
+	}
+	wlfw_answer_length = 0;
+	wlfw_waiting = wlfw_transaction;
+	if (qrtr_send(wlfw_port, wlfw_node, wlfw_service_port, packet, 7 + length) != 0) {
+		wlfw_waiting = 0;
+		printf("mpss: wlfw: %s: NOT SENT\n", what);
+		kfree_data(packet, 7 + length);
+		return false;
+	}
+	kfree_data(packet, 7 + length);
+	for (unsigned ms = 0; ms < 5000 && wlfw_waiting != 0; ms++) {
+		sleep_ms(1);
+	}
+	if (wlfw_waiting != 0) {
+		wlfw_waiting = 0;
+		printf("mpss: wlfw: %s: NO ANSWER in 5 s\n", what);
+		return false;
+	}
+	value = qmi_tlv(wlfw_answer, wlfw_answer_length, 2, &size);
+	if (value != NULL && size == 4) {
+		result = (uint16_t)(value[0] | value[1] << 8);
+		error = (uint16_t)(value[2] | value[3] << 8);
+		ok = result == 0;
+	}
+	printf("mpss: wlfw: %s: %s (result %u, error %u)\n", what, ok ? "done" : "REFUSED", result, error);
+	return ok;
+}
+
+static unsigned
+wlfw_put_u8(uint8_t *at, uint8_t type, uint8_t value)
+{
+	at[0] = type;
+	at[1] = 1;
+	at[2] = 0;
+	at[3] = value;
+	return 4;
+}
+
+static void
+wlfw_thread(__unused void *parameter, __unused wait_result_t result)
+{
+	static uint8_t tlvs[64 + WLFW_BDF_PIECE];  /* (one thread: not on its stack) */
+	unsigned at;
+	uint32_t chip_id = 0xff, chip_family = 0, board_id = 0xff, soc_id = 0;
+	const uint8_t *value;
+	uint16_t size = 0;
+	char name[32];
+	const uint8_t *board = NULL;
+	uint64_t board_size = 0;
+
+	/* the modem's QRTR, then the service: as long as it takes (the modem loads its Wi-Fi image some 30 s in) */
+	for (unsigned s = 0; s < 600 && !glink.channel[CHANNEL_QRTR].open; s++) {
+		sleep_ms(1000);
+	}
+	wlfw_port = qrtr_open(wlfw_receive, wlfw_server, NULL);
+	if (wlfw_port == NULL || qrtr_lookup(wlfw_port, WLFW_SERVICE, 1, 0) != 0) {
+		printf("mpss: wlfw: no port for the Wi-Fi firmware's service\n");
+		goto out;
+	}
+	for (unsigned s = 0; s < 300 && !wlfw_there; s++) {
+		sleep_ms(1000);
+	}
+	if (!wlfw_there) {
+		printf("mpss: wlfw: the Wi-Fi firmware's service (69) did not come in 5 minutes\n");
+		goto out;
+	}
+	printf("mpss: wlfw: THE WI-FI FIRMWARE'S SERVICE IS AT NODE %u PORT %u: the exchange begins (Linux's ath10k qmi.c)\n",
+	    wlfw_node, wlfw_service_port);
+
+	/* indications: "firmware ready" and "MSA ready", as ath10k's client */
+	at = 0;
+	at += wlfw_put_u8(tlvs + at, 0x10, 1);                          /* fw_ready_enable */
+	at += wlfw_put_u8(tlvs + at, 0x13, 1);                          /* msa_ready_enable */
+	at += qmi_put_u32(tlvs + at, 0x15, WLFW_CLIENT_ID);             /* client_id */
+	if (!wlfw_ask("the indications registered for", WLFW_IND_REGISTER, tlvs, at)) {
+		goto out;
+	}
+	value = qmi_tlv(wlfw_answer, wlfw_answer_length, 0x10, &size);  /* fw_status */
+	if (value != NULL && size == 8 && (value[0] & 2)) {
+		wlfw_fw_ready = true;
+		printf("mpss: wlfw: the firmware says it is ready already\n");
+	}
+
+	/* the host's capabilities: no daemon (ath10k) -- an older firmware that does not know the message is no matter */
+	at = qmi_put_u32(tlvs, 0x10, 0);
+	(void)wlfw_ask("the host's capabilities", WLFW_HOST_CAP, tlvs, at);
+
+	/* the firmware's memory: where it is and how big; the regions the firmware answers with are shown */
+	at = 0;
+	tlvs[at++] = 0x01;
+	tlvs[at++] = 8;
+	tlvs[at++] = 0;
+	for (unsigned b = 0; b < 8; b++) {
+		tlvs[at++] = (uint8_t)(WLFW_MSA_PA >> (8 * b));
+	}
+	at += qmi_put_u32(tlvs + at, 0x02, WLFW_MSA_SIZE);
+	if (!wlfw_ask("the firmware's memory (MSA, 2 MB at 0x93900000)", WLFW_MSA_INFO, tlvs, at)) {
+		goto out;
+	}
+	value = qmi_tlv(wlfw_answer, wlfw_answer_length, 0x03, &size);
+	if (value != NULL && size >= 1) {
+		for (unsigned r = 0; r < value[0] && 1 + 13 * (r + 1) <= size; r++) {
+			const uint8_t *e = value + 1 + 13 * r;
+			uint64_t address = 0;
+			uint32_t bytes = (uint32_t)(e[8] | e[9] << 8 | e[10] << 16 | (uint32_t)e[11] << 24);
+
+			for (unsigned b = 0; b < 8; b++) {
+				address |= (uint64_t)e[b] << (8 * b);
+			}
+			printf("mpss: wlfw:   the firmware's region %u: %#x bytes at %#llx%s\n", r, bytes, address, e[12] ? ", secure" : "");
+		}
+	}
+	/* (qcom,hyp_disabled: the memory is not assigned to the firmware through TrustZone, as ath10k's msa_fixed_perm) */
+	if (!wlfw_ask("the firmware's memory, ready", WLFW_MSA_READY, NULL, 0)) {
+		goto out;
+	}
+
+	/* what the chip and its board are */
+	if (wlfw_ask("the chip's capabilities", WLFW_CAP, NULL, 0)) {
+		if ((value = qmi_tlv(wlfw_answer, wlfw_answer_length, 0x10, &size)) != NULL && size >= 8) {
+			chip_id = (uint32_t)(value[0] | value[1] << 8 | value[2] << 16 | (uint32_t)value[3] << 24);
+			chip_family = (uint32_t)(value[4] | value[5] << 8 | value[6] << 16 | (uint32_t)value[7] << 24);
+		}
+		if ((value = qmi_tlv(wlfw_answer, wlfw_answer_length, 0x11, &size)) != NULL && size >= 4) {
+			board_id = (uint32_t)(value[0] | value[1] << 8 | value[2] << 16 | (uint32_t)value[3] << 24);
+		}
+		if ((value = qmi_tlv(wlfw_answer, wlfw_answer_length, 0x12, &size)) != NULL && size >= 4) {
+			soc_id = (uint32_t)(value[0] | value[1] << 8 | value[2] << 16 | (uint32_t)value[3] << 24);
+		}
+		printf("mpss: wlfw: the chip %#x of family %#x, the board %#x, the SoC %#x\n", chip_id, chip_family, board_id, soc_id);
+		if ((value = qmi_tlv(wlfw_answer, wlfw_answer_length, 0x14, &size)) != NULL && size >= 2) {
+			printf("mpss: wlfw: the firmware's build: %.*s\n", (int)(size - 1 < 120 ? size - 1 : 120), (const char *)value + 1);
+		}
+	}
+
+	/*
+	 * The board's data file: Android's naming, bdwlan.b<board id, 2 hex digits> (bdwlan.1<..> for ids above 0xff), else
+	 * bdwlan.bin; sent in pieces of 6144 bytes with the segment's number, the last marked as the end. The firmware's CRC
+	 * check of it may fail without harm (ath10k: "all the valid released BDFs fail this CRC check" on some platforms).
+	 */
+	if (board_id <= 0xff) {
+		snprintf(name, sizeof(name), "image/bdwlan.b%02x", board_id);
+	} else {
+		snprintf(name, sizeof(name), "image/bdwlan.%03x", board_id);
+	}
+	board = root_file(name, &board_size);
+	if (board == NULL) {
+		strlcpy(name, "image/bdwlan.bin", sizeof(name));
+		board = root_file(name, &board_size);
+	}
+	if (board == NULL) {
+		printf("mpss: wlfw: no board data file (fw/image/bdwlan.*): the firmware is left to find its own\n");
+	} else {
+		uint32_t sent = 0, segment = 0;
+		bool ok = true;
+
+		printf("mpss: wlfw: the board's data: fw/%s, %llu bytes\n", name, board_size);
+		while (ok && sent < board_size) {
+			uint32_t piece = board_size - sent > WLFW_BDF_PIECE ? WLFW_BDF_PIECE : (uint32_t)(board_size - sent);
+			bool end = sent + piece == board_size;
+
+			at = wlfw_put_u8(tlvs, 0x01, 1);                        /* valid */
+			at += qmi_put_u32(tlvs + at, 0x10, 0);                  /* file_id */
+			at += qmi_put_u32(tlvs + at, 0x11, (uint32_t)board_size);       /* total_size */
+			at += qmi_put_u32(tlvs + at, 0x12, segment);            /* seg_id */
+			tlvs[at++] = 0x13;                                      /* data: a 2-byte length, then the bytes */
+			tlvs[at++] = (uint8_t)(piece + 2);
+			tlvs[at++] = (uint8_t)((piece + 2) >> 8);
+			tlvs[at++] = (uint8_t)piece;
+			tlvs[at++] = (uint8_t)(piece >> 8);
+			memcpy(tlvs + at, board + sent, piece);
+			at += piece;
+			at += wlfw_put_u8(tlvs + at, 0x14, end ? 1 : 0);        /* end */
+			ok = wlfw_ask(end ? "the board's data, its last piece" : "the board's data, a piece", WLFW_BDF_DOWNLOAD, tlvs, at);
+			if (!ok && end) {
+				value = qmi_tlv(wlfw_answer, wlfw_answer_length, 2, &size);
+				ok = value != NULL && size == 4 && (value[2] | value[3] << 8) == 1;     /* QMI_ERR_MALFORMED_MSG: the CRC */
+				if (ok) {
+					printf("mpss: wlfw: the firmware's CRC check of the board's data fails; it uses it all the same\n");
+				}
+			}
+			sent += piece;
+			segment++;
+		}
+		kfree_data((void *)(uintptr_t)board, board_size);
+		if (!ok) {
+			goto out;
+		}
+	}
+
+	/* the calibrations the host has: none */
+	tlvs[0] = 0x01;
+	tlvs[1] = 1;
+	tlvs[2] = 0;
+	tlvs[3] = 0;
+	(void)wlfw_ask("the calibrations reported (none)", WLFW_CAL_REPORT, tlvs, 4);
+
+	for (unsigned ms = 0; ms < 15000 && !wlfw_fw_ready; ms += 10) {
+		sleep_ms(10);
+	}
+	printf("mpss: wlfw: %s\n", wlfw_fw_ready ? "THE WI-FI FIRMWARE IS READY: the radio's driver (ath10k snoc) is what comes next" :
+	    "the firmware has not said it is ready in 15 s");
+out:
+	thread_terminate(current_thread());
+}
+
+static void
+wlfw_start(void)
+{
+	uint32_t want = bells_apcs ? 1 : 0;
+	thread_t thread;
+
+	PE_parse_boot_argn("wlfw", &want, sizeof(want));
+	if (want != 0 && kernel_thread_start(wlfw_thread, NULL, &thread) == KERN_SUCCESS) {
+		thread_deallocate(thread);
+	}
+}
+
 /* ---- step 8: GLINK's queues, looked at -------------------------------------------------------------- */
 
 static bool
@@ -6480,6 +6808,7 @@ whole_thread(__unused void *parameter, __unused wait_result_t result)
 			sleep_ms(after * 1000);
 		}
 	}
+	wlfw_start();
 	run_steps();
 	for (unsigned i = 0; i < sizeof(qrtr_servers) / sizeof(qrtr_servers[0]); i++) {
 		services += qrtr_servers[i].there;
