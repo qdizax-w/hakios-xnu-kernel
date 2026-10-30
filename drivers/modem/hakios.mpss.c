@@ -3762,35 +3762,15 @@ rmtfs_buffer_make(void)
 	if (rmtfs_window != NULL) {
 		return true;
 	}
-	rmtfs_buffer_pa = RMTFS_BUFFER_PA_DEFAULT;
-	if (bells_apcs) {
-		/*
-		 * miatoll: memory of this kernel's own, as Android takes its buffer (dt: qcom,rmtfs_sharedmem@0, reg 0: allocated
-		 * at run time): the POCO's 0x9c700000 is inside this phone's framebuffer, and its compute DSP's reserved memory
-		 * (0x8f300000) is not HLOS's to give, TrustZone said (-2). Physically contiguous, used through its own cached view
-		 * with the caches written back and emptied around every transfer (rmtfs_sync()): a second, uncached mapping of a
-		 * page this kernel manages is not made.
-		 */
-		vm_offset_t own = 0;
-
-		/* (below 4 GB: the modem gives the buffer's addresses in 32 bits; one above was read at its low half, 30 October) */
-		if (kmem_alloc_contig(kernel_map, &own, RMTFS_BUFFER_SIZE, PAGE_MASK, (ppnum_t)((0x100000000ull >> PAGE_SHIFT) - 1), 0,
-		    KMA_KOBJECT | KMA_ZERO | KMA_DATA,
-		    VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS || own == 0) {
-			printf("mpss: %u: no %u bytes of contiguous memory for the modem's buffer\n", step, RMTFS_BUFFER_SIZE);
-			return false;
-		}
-		for (vm_offset_t line = own; line < own + RMTFS_BUFFER_SIZE; line += 64) {
-			__asm__ volatile ("dc civac, %0" : : "r" (line));
-		}
-		__asm__ volatile ("dsb sy" ::: "memory");
-		rmtfs_buffer_pa = kvtophys(own);
-		rmtfs_window = (volatile uint8_t *)own;
-		rmtfs_cached = true;
-	} else {
-		PE_parse_boot_argn("modem_buffer", &rmtfs_buffer_pa, sizeof(rmtfs_buffer_pa));      /* (another region, to try) */
-		rmtfs_window = (volatile uint8_t *)ml_io_map_unmappable((vm_offset_t)rmtfs_buffer_pa, RMTFS_BUFFER_SIZE, VM_WIMG_WCOMB);
-	}
+	/*
+	 * miatoll: free RAM below 4 GB that this kernel does not use (the firmware's memory map: 0x98b00000-0x9b800000, type 7;
+	 * the kernel's window begins at 0xb0000000), so the main OS's to give: the POCO's 0x9c700000 is inside this phone's
+	 * framebuffer, the compute DSP's region (0x8f300000) is not HLOS's (TrustZone said -2), memory of the kernel's own was
+	 * above 4 GB and the modem gives its addresses in 32 bits, and none below was left contiguous.
+	 */
+	rmtfs_buffer_pa = bells_apcs ? 0x9b000000ull : RMTFS_BUFFER_PA_DEFAULT;
+	PE_parse_boot_argn("modem_buffer", &rmtfs_buffer_pa, sizeof(rmtfs_buffer_pa));      /* (another region, to try) */
+	rmtfs_window = (volatile uint8_t *)ml_io_map_unmappable((vm_offset_t)rmtfs_buffer_pa, RMTFS_BUFFER_SIZE, VM_WIMG_WCOMB);
 	if (rmtfs_window == NULL) {
 		printf("mpss: %u: the modem's buffer at %#llx cannot be mapped\n", step, rmtfs_buffer_pa);
 		return false;
