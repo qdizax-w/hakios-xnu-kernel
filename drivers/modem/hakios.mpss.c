@@ -3808,6 +3808,20 @@ rmtfs_buffer_make(void)
  * TrustZone asked to let the modem into the buffer (Linux's qcom_scm_assign_mem(): the memory, who
  * has it now, who is to have it and how), or, with `in` false, out of it again.
  */
+/*
+ * The navigation side among the buffer's owners: the POCO's device tree names it (qcom,vm-nav-path of the rmtfs buffer),
+ * miatoll's does not, and TrustZone refused the three-way share there (-2, 0x56; 30 October): on miatoll the modem alone.
+ * modem_no_nav=1 / =0 says otherwise.
+ */
+static bool
+no_nav(void)
+{
+	uint32_t value = bells_apcs ? 1 : 0;
+
+	PE_parse_boot_argn("modem_no_nav", &value, sizeof(value));
+	return value != 0;
+}
+
 static bool
 rmtfs_share(bool in)
 {
@@ -3847,12 +3861,12 @@ rmtfs_share(bool in)
 		page->destinations[1].permission = VM_PERM_RW;
 		page->destinations[2].vmid = VMID_NAV;
 		page->destinations[2].permission = VM_PERM_RW;
-		destinations = option("modem_no_nav") ? 2 : 3;
+		destinations = no_nav() ? 2 : 3;
 	} else {
 		page->sources[0] = VMID_HLOS;
 		page->sources[1] = VMID_MSS_MSA;
 		page->sources[2] = VMID_NAV;
-		sources = option("modem_no_nav") ? 2 : 3;
+		sources = no_nav() ? 2 : 3;
 		page->destinations[0].vmid = VMID_HLOS;
 		page->destinations[0].permission = VM_PERM_RW;
 		destinations = 1;
