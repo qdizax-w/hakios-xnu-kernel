@@ -384,16 +384,33 @@ wifi(void)
 	char arguments[1024] = "";
 	size_t size = sizeof(arguments) - 1;
 	double start = seconds();
-	bool wanted = false, there = false;
+	bool wanted = false, there = false, radio = false, cable = false;
 
 	if (sysctlbyname("kern.bootargs", arguments, &size, NULL, 0) != 0) {
 		return;
 	}
 	for (const char *word = strtok(arguments, " "); word != NULL; word = strtok(NULL, " ")) {
-		wanted |= strcmp(word, "wifi=1") == 0 || strcmp(word, "usbnet=1") == 0;    /* (usbnet: the USB cable, hakios.usbnet.c) */
+		radio |= strcmp(word, "wifi=1") == 0;
+		cable |= strcmp(word, "usbnet=1") == 0;    /* (usbnet: the USB cable, hakios.usbnet.c) */
 	}
+	wanted = radio || cable;
 	if (!wanted) {
 		return;
+	}
+	/*
+	 * Both: the radio is en0 and the cable en2 (hakios.usbnet.c), which has no IOKit objects, so no service of configd's:
+	 * DHCP is asked for on it, so that the computer at the other end (its connection sharing) gives it an address.
+	 */
+	if (radio && cable) {
+		while (if_nametoindex("en2") == 0 && seconds() - start < 120) {
+			usleep(500000);
+		}
+		if (if_nametoindex("en2") != 0) {
+			printf("net_test: wifi: the cable is en2 (the radio en0): DHCP asked for on it\n");
+			dhcp("en2");
+		} else {
+			printf("net_test: wifi: no en2 after %.0f s: the cable has no interface\n", seconds() - start);
+		}
 	}
 	while (!(there = if_nametoindex("en0") != 0) && seconds() - start < 120) {
 		usleep(500000);
