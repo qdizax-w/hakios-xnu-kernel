@@ -5453,7 +5453,11 @@ wlfw_thread(__unused void *parameter, __unused wait_result_t result)
 			sent += piece;
 			segment++;
 		}
-		kfree_data((void *)(uintptr_t)board, board_size);
+		{
+			uint8_t *owned = (uint8_t *)(uintptr_t)board;  /* (kfree_data() takes a variable, which it clears) */
+
+			kfree_data(owned, board_size);
+		}
 		if (!ok) {
 			goto out;
 		}
