@@ -61,7 +61,7 @@ LCK_MTX_DECLARE(hakios_scm_lock, &hakios_platform_lock_group);
  * A number on the screen, big, for a start that may stop the phone dead: the last number shown stays there when nothing
  * runs any more, and whoever holds the phone can say it -- when no log can be read (the network not up yet, or stopped
  * with everything else). Two digits drawn as a seven-segment display in the top half of the panel, row 0 cyan (the audio
- * DSP, the sound), row 1 yellow (the modem), row 2 white; a black box under them first. Boot-arg marks=0: none.
+ * DSP, the sound), row 1 yellow (the modem), row 2 white; a black box under them first. Only with boot-arg marks=1.
  */
 extern bool loader_screen(const uint8_t **base, uint32_t *width, uint32_t *height, uint32_t *stride);
 
@@ -91,7 +91,7 @@ hakios_mark(unsigned row, unsigned value)
 	const uint32_t w = 120, h = 220, t = 26;        /* a digit's width, height, and its segments' thickness */
 
 	if (enabled < 0) {
-		uint32_t want = 1;
+		uint32_t want = 0;              /* (only for a test: boot-arg marks=1) */
 
 		PE_parse_boot_argn("marks", &want, sizeof(want));
 		enabled = want != 0;
