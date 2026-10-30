@@ -20,6 +20,7 @@
 #include <sys/hakios.audio.h>
 #include <sys/hakios.input.h>
 #include <sys/hakios.net.h>
+#include <sys/hakios.qrtr.h>
 #include <sys/hakios.virtio_blk.h>
 
 /* the ends of a run (loader_return.c, the guards), which have no header of their own */
@@ -96,6 +97,7 @@ void hakios_wifi_stop(void) {}
 void hakios_wifi_quiesce(void) {}
 errno_t hakios_apple80211_ioctl(__unused u_long command, __unused void *data) { return EOPNOTSUPP; }
 void HakiosWLANStart(__unused const char *interface, __unused const uint8_t *address) {}
+bool hakios_wifi_modem_firmware_ready(void) { return false; }
 #endif
 
 #ifndef HAKIOS_ADSP
@@ -108,6 +110,8 @@ void hakios_adsp_quiesce(void) {}
 void hakios_mpss_init(void) {}
 void hakios_mpss_stop(void) {}
 void hakios_mpss_quiesce(void) {}
+const struct hakios_qrtr_ops *hakios_mpss_qrtr(void) { return NULL; }
+bool hakios_mpss_soc_serial(__unused uint32_t *serial) { return false; }
 #endif
 
 #ifndef HAKIOS_VIRTIO_NET

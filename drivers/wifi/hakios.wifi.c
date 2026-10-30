@@ -332,6 +332,7 @@ settle(void)
 /* ---- options --------------------------------------------------------------------------------------- */
 
 static bool whole;                      /* wifi=1: all of it, by itself (see the top of this file) */
+static bool miatoll;                    /* ... on the Redmi Note 9S: see "miatoll" at the end of this file */
 static volatile bool whole_runs;        /* ... and the thread that does it is at work */
 
 /*
@@ -346,6 +347,14 @@ hakios_wifi_option(const char *name)
 		uint32_t value;
 	} stands_for[] = { { "wifi_lx", 2 }, { "wifi_smmu", 2 }, { "wifi_station", 1 }, { "wifi_keep", 1 }, { "wifi_irq", 1 },
 			   { "wifi_ba", 1 }, { "wifi_wide", 1 } };
+	/*
+	 * miatoll (ath10k, wifi/lx/src10/lx_snoc.c): its copy engines are looked at, not interrupted (wifi_irq is the
+	 * WCN6750's); the firmware answers the access point's requests for block acks itself; 20 MHz channels to begin with.
+	 */
+	static const struct {
+		const char *name;
+		uint32_t value;
+	} stands_for_miatoll[] = { { "wifi_irq", 0 }, { "wifi_ba", 0 }, { "wifi_wide", 0 } };
 	uint32_t value = 0;
 
 	if (strcmp(name, "wifi_quiet") == 0) {
@@ -353,6 +362,11 @@ hakios_wifi_option(const char *name)
 	}
 	if (PE_parse_boot_argn(name, &value, sizeof(value))) {
 		return value;
+	}
+	for (unsigned i = 0; miatoll && i < sizeof(stands_for_miatoll) / sizeof(stands_for_miatoll[0]); i++) {
+		if (strcmp(name, stands_for_miatoll[i].name) == 0) {
+			return stands_for_miatoll[i].value;
+		}
 	}
 	for (unsigned i = 0; whole && i < sizeof(stands_for) / sizeof(stands_for[0]); i++) {
 		if (strcmp(name, stands_for[i].name) == 0) {
@@ -3595,8 +3609,9 @@ static struct block apps_smmu = { "apps smmu", 0x15000000, 0x2000 };
 #define SMMU_IDR1               0x024           /* bit 31: 64K pages, [30:28] log2(pages)-1, [7:0] translation contexts */
 #define SMMU_SMR(n)             (0x800 + 4 * (n))       /* bit 31 valid, [30:16] mask, [14:0] stream */
 #define SMMU_S2CR(n)            (0xc00 + 4 * (n))       /* [17:16] 0 translate 1 bypass 2 fault, [7:0] context */
-#define RADIO_STREAM            0x1c00
+#define RADIO_STREAM            radio_stream    /* 0x1c00; miatoll's WCN3990 (dt: wifi@18800000, "iommus"): 0xc0 */
 #define RADIO_STREAM_MASK       0x0001
+static uint32_t radio_stream = 0x1c00;
 
 static void
 smmu_look(void)
@@ -3706,6 +3721,7 @@ smmu_look(void)
 static struct {
 	uint32_t wanted;                /* wifi_smmu */
 	bool found, on;
+	bool bypass;                    /* the boot chain lets the stream pass untranslated: addresses are physical */
 	uint32_t page, pages;           /* of the SMMU's registers: a page's size, and how many before the contexts' */
 	uint32_t match, context;        /* the stream match register and the context taken for the radio */
 	uint32_t old_smr, old_s2cr, old_sctlr;
@@ -3799,6 +3815,21 @@ radio_space_find(void)
 			printf("wifi: %u: match register %u is in use: stream %#x mask %#x, s2cr %#x\n", step, n, smr & 0x7fff,
 			    smr >> 16 & 0x7fff, s2cr);
 			used[s2cr & 0xff] = true;
+			/*
+			 * One that covers the radio's stream already (a second would make the SMMU refuse both): if it lets the
+			 * stream pass untranslated, the radio is given physical addresses; anything else is somebody's
+			 */
+			if ((((smr & 0x7fff) ^ RADIO_STREAM) & ~((smr >> 16 & 0x7fff) | RADIO_STREAM_MASK)) == 0) {
+				if ((s2cr >> 16 & 3) == 1) {
+					printf("wifi: %u: MATCH REGISTER %u LETS THE RADIO'S STREAM %#x PASS UNTRANSLATED: the radio is given "
+					    "physical addresses, and the SMMU is not written\n", step, n, RADIO_STREAM);
+					radio_space.bypass = radio_space.found = true;
+					return true;
+				}
+				printf("wifi: %u: MATCH REGISTER %u HAS THE RADIO'S STREAM %#x ALREADY (s2cr %#x): it is left alone, and the "
+				    "radio is shown nothing\n", step, n, RADIO_STREAM, s2cr);
+				return false;
+			}
 		} else if (radio_space.match == ~0u) {
 			radio_space.match = n;
 			radio_space.old_smr = smr;
@@ -3951,7 +3982,18 @@ radio_map(uint64_t physical, uint64_t size, uint64_t attributes, unsigned long l
 		return true;
 	}
 	lck_mtx_lock(&hakios_smmu_lock);       /* (the sound may be looking for a free context at the same time) */
-	if ((!radio_space.found && !radio_space_find()) || !radio_enter(*address, physical, size, attributes)) {
+	if (!radio_space.found && !radio_space_find()) {
+		lck_mtx_unlock(&hakios_smmu_lock);
+		return false;
+	}
+	if (radio_space.bypass) {
+		lck_mtx_unlock(&hakios_smmu_lock);
+		radio_space.next -= size;       /* (the address is the memory's own) */
+		*address = physical;
+		printf("wifi: %u: the radio is to see %llu KB of ours at their own address, %#llx\n", step, size >> 10, physical);
+		return true;
+	}
+	if (!radio_enter(*address, physical, size, attributes)) {
 		lck_mtx_unlock(&hakios_smmu_lock);
 		return false;
 	}
@@ -4024,10 +4066,15 @@ radio_space_try(void)
 bool
 hakios_wifi_dsp_is_up(void)
 {
+	if (miatoll) {
+		return true;                    /* (the modem: its Wi-Fi firmware has said it is ready before the driver starts) */
+	}
 	printf("wifi: %u: the driver asks for the firmware's processor: it %s\n", step, dsp_started && glink.open ? "has been up "
 	    "since step 11, with the link of step 13" : "IS NOT UP");
 	return dsp_started && glink.open;
 }
+
+static const uint8_t *miatoll_driver_file(const char *name, uint64_t *size);
 
 /*
  * ath11k asks for files by the names Linux's firmware tree has ("ath11k/WCN6750/hw1.0/board.bin");
@@ -4043,6 +4090,9 @@ hakios_wifi_driver_file(const char *name, uint64_t *size)
 	const char *last = strrchr(name, '/');
 
 	last = last == NULL ? name : last + 1;
+	if (miatoll) {
+		return miatoll_driver_file(last, size);
+	}
 	for (unsigned i = 0; i < sizeof(files) / sizeof(files[0]); i++) {
 		if (strcmp(last, files[i][0]) == 0) {
 			return image_file(files[i][1], size);
@@ -4050,6 +4100,8 @@ hakios_wifi_driver_file(const char *name, uint64_t *size)
 	}
 	return NULL;
 }
+
+static bool miatoll_radio_address(uint8_t *address);
 
 /*
  * The radio's own address. Its firmware has none (it says zeros): Android keeps the phone's in
@@ -4067,6 +4119,9 @@ hakios_wifi_radio_address(uint8_t *address)
 	bool good;
 
 	if (!PE_parse_boot_arg_str("wifi_mac", text, sizeof(text)) || text[0] == 0) {
+		if (miatoll) {
+			return miatoll_radio_address(address);
+		}
 		printf("wifi: %u: the driver asks for the radio's address: none was given (wifi_mac)\n", step);
 		return false;
 	}
@@ -4161,6 +4216,14 @@ hakios_wifi_stop(void)
 		sleep_ms(10);
 	}
 	hakios_apple80211_summary();
+	if (miatoll) {
+		/* (the firmware is the modem's, and stops with it: the driver goes down in order, and the radio's stream is let go) */
+		hakios_lx_stop();
+		lck_mtx_lock(&hakios_smmu_lock);
+		radio_space_off();
+		lck_mtx_unlock(&hakios_smmu_lock);
+		return;
+	}
 	lck_mtx_lock(&dsp_lock);
 	if (dsp_started && !dirty) {
 		bool down = dsp_shutdown("the run is about to end");
@@ -4185,6 +4248,10 @@ void
 hakios_wifi_quiesce(void)
 {
 	hakios_apple80211_summary();           /* (also when the run is ended from the phone: five fingers) */
+	if (miatoll) {
+		radio_space_off();              /* (no lock: one processor is left; the modem's firmware is stopped with the modem) */
+		return;
+	}
 	if (!dsp_started || dirty) {
 		return;
 	}
@@ -4309,6 +4376,140 @@ whole_thread(__unused void *parameter, __unused wait_result_t result)
 	thread_terminate(current_thread());
 }
 
+/* ---- miatoll: the Redmi Note 9S --------------------------------------------------------------------- */
+
+/*
+ * The radio of this phone is a WCN3990, whose firmware is not a DSP of its own to start: it is part of the modem's
+ * (wlanmdsp.mbn), which drivers/modem/hakios.mpss.c starts with modem=1. That driver's client of the firmware's
+ * service (WLFW) gives it its memory and its board's data, and when the firmware says it is ready it hands it over here
+ * (hakios_wifi_modem_firmware_ready()). From there on it is Linux's ath10k (tools/mk-ath10k.sh, its bus in
+ * wifi/lx/src10/lx_snoc.c) on the modem's QRTR: its own client hears that the firmware is ready, sends the copy engines'
+ * configuration and the mode, and drives the radio's copy engines at 0x18800000 -- whose rings it is shown through the
+ * application processors' SMMU as stream 0xc0 (dt: wifi@18800000), in a context of ours as on the POCO (radio_map()).
+ * Its station is iOS's Wi-Fi, en0 (the USB cable is then en2: hakios.usbnet.c).
+ *
+ * Nothing of the WCN6750's steps above is run here. Boot-args: wifi=1 (with modem=1), wifi_mac (else the address is
+ * made of the SoC's serial number), wifi_loud=0 to keep the driver's log back until something fails.
+ */
+#define MIATOLL_SOC_BASE        0x00100000ul    /* the loader's "miatoll" */
+#define MIATOLL_RADIO_STREAM    0x00c0
+
+/*
+ * ath10k's "firmware-N.bin" for this chip holds no firmware -- the WCN3990's is the modem's -- only what the driver is to
+ * know of that firmware's interfaces: elements after the magic "QCA-ATH10K" (core.c: ath10k_core_fetch_firmware_api_n()).
+ * What Linux's ath10k/WCN3990/hw1.0 file says is said here: WMI and HTT are the "TLV" ones (5: 4, 6: 3); the firmware is
+ * not loaded by the driver ("non-bmi", feature 19) and takes management frames by reference (18).
+ */
+static const uint8_t ath10k_features_file[] = {
+	'Q', 'C', 'A', '-', 'A', 'T', 'H', '1', '0', 'K', 0, 0,         /* the magic, its 0, and up to four */
+	0, 0, 0, 0, 8, 0, 0, 0, 'h', 'a', 'k', 'i', 'o', 's', '-', 'm', /* FW_VERSION: a name, 8 bytes */
+	2, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0x0c, 0,                          /* FEATURES: bits 18 and 19 */
+	5, 0, 0, 0, 4, 0, 0, 0, 4, 0, 0, 0,                             /* WMI_OP_VERSION: TLV */
+	6, 0, 0, 0, 4, 0, 0, 0, 3, 0, 0, 0,                             /* HTT_OP_VERSION: TLV */
+};
+
+static const uint8_t *
+miatoll_driver_file(const char *name, uint64_t *size)
+{
+	if (strcmp(name, "firmware-5.bin") == 0) {
+		*size = sizeof(ath10k_features_file);
+		return ath10k_features_file;
+	}
+	printf("wifi: the driver asks for %s, which there is none of here\n", name);
+	return NULL;
+}
+
+/*
+ * Android takes the radio's address from the phone's storage; here it is wifi_mac, or else made of the SoC's serial
+ * number -- the same every run on this phone, another on another --, as a locally administered one (02:...).
+ */
+static bool
+miatoll_radio_address(uint8_t *address)
+{
+	uint32_t serial = 0;
+
+	if (!hakios_mpss_soc_serial(&serial)) {
+		serial = 0x4b3e9001;
+		printf("wifi: the radio's address: none was given (wifi_mac) and the SoC's serial number cannot be read: a fixed one\n");
+	} else {
+		printf("wifi: the radio's address: none was given (wifi_mac): it is made of the SoC's serial number\n");
+	}
+	address[0] = 0x02;
+	address[1] = 0x4e;
+	address[2] = (uint8_t)(serial >> 24);
+	address[3] = (uint8_t)(serial >> 16);
+	address[4] = (uint8_t)(serial >> 8);
+	address[5] = (uint8_t)serial;
+	return true;
+}
+
+static void
+miatoll_thread(__unused void *parameter, __unused wait_result_t result)
+{
+	uint64_t began = now_us();
+	const struct hakios_qrtr_ops *transport = hakios_mpss_qrtr();
+	int error;
+
+	step = 15;
+	if (transport == NULL) {
+		tell("wifi: the modem's QRTR is not there: the radio is not brought up\n");
+		whole_runs = false;
+		thread_terminate(current_thread());
+	}
+	hakios_qmi_set_transport(transport);
+	tell("wifi: the modem's Wi-Fi firmware is ready: now the driver (ath10k)\n");
+	error = hakios_lx_start();
+	if (error == 0) {
+		tell("wifi: THE RADIO IS UP, %llu.%llu s after the firmware said it was ready\n", (now_us() - began) / 1000000,
+		    (now_us() - began) / 100000 % 10);
+		join_given(began);
+	} else {
+		tell("wifi: THE RADIO DID NOT COME UP: the driver's start returns %d, %llu s in. The last of what was said on the way:\n",
+		    error, (now_us() - began) / 1000000);
+		say_kept();
+	}
+	whole_runs = false;
+	thread_terminate(current_thread());
+}
+
+/* Called by the modem's driver when the Wi-Fi firmware has said it is ready: true if the driver is started on it. */
+bool
+hakios_wifi_modem_firmware_ready(void)
+{
+	thread_t thread;
+
+	if (!miatoll || whole_runs) {
+		return false;
+	}
+	whole_runs = true;
+	if (kernel_thread_start(miatoll_thread, NULL, &thread) != KERN_SUCCESS) {
+		whole_runs = false;
+		tell("wifi: no thread: the radio is not brought up\n");
+		return false;
+	}
+	thread_deallocate(thread);
+	return true;
+}
+
+static void
+miatoll_init(void)
+{
+	uint32_t modem = 0, loud = 1;
+
+	if (!PE_parse_boot_argn("modem", &modem, sizeof(modem)) || modem == 0) {
+		tell("wifi: on this phone the radio's firmware runs in the modem: wifi=1 wants modem=1 as well. No Wi-Fi\n");
+		return;
+	}
+	miatoll = whole = true;
+	radio_stream = MIATOLL_RADIO_STREAM;
+	PE_parse_boot_argn("wifi_loud", &loud, sizeof(loud));
+	quiet = loud == 0;
+	pause_ms = watch_seconds = 0;
+	new_from = STEPS + 1;
+	hakios_lx_net_early();
+	tell("wifi: the radio is brought up when the modem's Wi-Fi firmware says it is ready (wifi=1)\n");
+}
+
 /*
  * Called while the system starts, before there is a root file system. With wifi_step=N the start
  * waits until the steps are over (see hakios_adreno_init()); with wifi=1 it does not.
@@ -4326,6 +4527,10 @@ hakios_wifi_init(void)
 	}
 	if (last_step == 0 && on != 1) {
 		printf("wifi: wifi=%u is not understood: wifi=1 turns the radio on, wifi_step=N goes the first N steps of that\n", on);
+		return;
+	}
+	if (pe_arm_get_soc_base_phys() == MIATOLL_SOC_BASE) {
+		miatoll_init();
 		return;
 	}
 	if (pe_arm_get_soc_base_phys() != HAKIOS_SOC_BASE) {

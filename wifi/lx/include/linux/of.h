@@ -52,6 +52,25 @@ struct device_node *of_find_node_by_phandle(phandle handle);
 struct device_node *of_parse_phandle(const struct device_node *np, const char *name, int index);
 const struct of_device_id *of_match_node(const struct of_device_id *matches, const struct device_node *np);
 
+/* (properties of kinds no tree here has: ath10k's calibration bytes, coexistence, front-end name) */
+static inline int
+of_property_read_u8_array(const struct device_node *np, const char *name, u8 *out, size_t n)
+{
+	return (-EINVAL);
+}
+
+static inline int
+of_property_read_u8(const struct device_node *np, const char *name, u8 *out)
+{
+	return (-EINVAL);
+}
+
+static inline int
+of_property_read_string_index(const struct device_node *np, const char *name, int index, const char **out)
+{
+	return (-EINVAL);
+}
+
 static inline int
 of_property_read_u32(const struct device_node *np, const char *name, u32 *out)
 {

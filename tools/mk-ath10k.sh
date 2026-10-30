@@ -94,11 +94,15 @@ if [ ! -d gen ]; then
 fi
 
 # --- compile: the driver's files that are built so far, and ours
-DRIVER="core hw ce htc htt htt_rx htt_tx txrx mac wmi wmi-tlv qmi qmi_wlfw_v01 bmi p2p snoc"
+# (snoc.c, the bus, is compiled as part of wifi/lx/src10/lx_snoc.c, which stands where the device tree and the
+# platform bus would and calls the driver's probe itself)
+DRIVER="core hw ce htc htt htt_rx htt_tx txrx mac wmi wmi-tlv qmi qmi_wlfw_v01 bmi p2p"
 CC="clang -target arm64-apple-ios16.5"
-LD=$ROOT/xnu-deps/host/bin/ld64
+LD=$ROOT/xnu-deps/host/bin/ld64 NM=llvm-nm SIZE=llvm-size
+# (on a Mac, its own linker and tools, which are the same ld64)
+[ "$(uname)" = Darwin ] && [ ! -x "$LD" ] && LD=/usr/bin/ld NM="nm" SIZE=size
 CFLAGS="-mkernel -mgeneral-regs-only -fno-builtin -fno-common -ffreestanding -fno-strict-aliasing
-	-funsigned-char -nostdinc -std=gnu17 -O2 -g -w
+	-funsigned-char -nostdinc -std=gnu17 -O2 -g -Wno-everything -Werror=implicit-function-declaration -Werror=int-conversion
 	-D__FreeBSD__=15 -D_KERNEL -DKLD_MODULE -DHAVE_KERNEL_OPTION_HEADERS -include opt_global.h
 	-I$W/include -Igen -I$S -I$S/contrib/ck/include
 	-I$S/compat/linuxkpi/common/include -I$S/compat/linuxkpi/dummy/include
@@ -147,7 +151,7 @@ OBJECTS=$(for f in $DRIVER; do echo obj/ath10k_$f.o; done; for f in $ATH_COMMON;
 KERNEL="memcmp memcpy memmove memset strcmp strncmp strlen strchr strrchr strlcpy strlcat bzero
 	snprintf vsnprintf __stack_chk_fail __stack_chk_guard"
 $LD -r -arch arm64 $OBJECTS -o out/all.o 2> out/ld.err || { cat out/ld.err; exit 1; }
-llvm-nm -u --format=just-symbols out/all.o | sed 's/^_//' | sort > out/undefined.txt
+$NM -u out/all.o | sed 's/^_//' | sort > out/undefined.txt
 : > out/stubs.txt
 : > out/stubs.s
 missing=
@@ -169,6 +173,6 @@ printf '_lx_prepare\n_lx_start\n_lx_stop\n_lx_transmit\n' > out/exported.txt
 $LD -r -arch arm64 -exported_symbols_list out/exported.txt out/all.o out/stubs.o -o out/ath10k.o 2> out/ld.err ||
 	{ cat out/ld.err; exit 1; }
 rm -f out/all.o
-echo "mk-ath10k.sh: out/ath10k.o: $(llvm-size out/ath10k.o | awk 'NR == 2 { print $1 + $2 }') bytes of code and data from" \
+echo "mk-ath10k.sh: out/ath10k.o: $($SIZE out/ath10k.o | awk 'NR == 2 { print $1 + $2 }') bytes of code and data from" \
 	"$(echo $DRIVER | wc -w) of the driver's files; $(wc -l < out/stubs.txt) functions of the others are stubs (out/stubs.txt);" \
-	"asks the kernel for $(llvm-nm -u --format=just-symbols out/ath10k.o | grep -vc 'section\$') names"
+	"asks the kernel for $($NM -u out/ath10k.o | grep -vc 'section\$') names"

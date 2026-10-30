@@ -8,6 +8,7 @@
 #include <linux/types.h>
 #include <linux/interrupt.h>
 #include <linux/dma-mapping.h>
+#include <linux/delay.h>		/* (ath10k's hw.c and htc.c wait without including it) */
 #include <linux/module.h>
 #include <linux/ieee80211.h>
 #include <net/cfg80211.h>
@@ -18,6 +19,7 @@ DEFINE_LOCK_GUARD_1(spinlock_bh, spinlock_t, spin_lock_bh(_T->lock), spin_unlock
 /* --- interrupts: how the line is triggered is the kernel's knowledge, not the driver's */
 #define IRQF_TRIGGER_RISING	0x0001
 #define IRQ_NOAUTOEN		(1 << 12)	/* request_irq() leaves the interrupt disabled */
+#define IRQF_NO_AUTOEN		0x00080000	/* ... said to request_irq() itself (ath10k's snoc.c) */
 #define IRQ_DISABLE_UNLAZY	(1 << 19)	/* disable_irq() masks at once: it always does here */
 int enable_irq_wake(unsigned int irq);
 int disable_irq_wake(unsigned int irq);

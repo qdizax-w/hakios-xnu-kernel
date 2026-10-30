@@ -37,6 +37,8 @@ jobs:
           python3 tools/hakios-config.py defconfig miatoll
           xnu/apply.sh
           xnu-deps/setup.sh || { for f in xnu-deps/*.log; do echo "=== $f"; grep -n -iE 'error|not found|No such' $f | head -30; tail -40 $f; done; exit 1; }
+          # the radio's driver: Linux's ath10k on wifi/lx, linked into the kernel by xnu-build.sh (CONFIG_HAKIOS_WIFI)
+          tools/mk-ath10k.sh
           # ends with the export check's error after the kernel is linked (xnu/README.md): judge by the file
           KERNEL_LOG=kernel-build.log tools/make-kernel.sh -j"$(nproc)" > /dev/null 2>&1 || true
           K=xnu-src/xnu-8796.121.2/BUILD/obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837

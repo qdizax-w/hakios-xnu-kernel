@@ -340,6 +340,13 @@ linuxkpi_regulatory_set_wiphy_regd_sync(struct wiphy *wiphy, struct linuxkpi_iee
 	return (0);
 }
 
+/* A domain of `rules` rules, zeroed, for the driver to fill in (ath10k: regulatory_hint() with its country). */
+struct linuxkpi_ieee80211_regdomain *
+lkpi_get_linuxkpi_ieee80211_regdomain(size_t rules)
+{
+	return (kzalloc(sizeof(struct linuxkpi_ieee80211_regdomain) + rules * sizeof(struct ieee80211_reg_rule), GFP_KERNEL));
+}
+
 /* IEEE 802.11-2020, Annex E: a channel's centre, in MHz */
 uint32_t
 linuxkpi_ieee80211_channel_to_frequency(uint32_t channel, enum nl80211_band band)
@@ -481,6 +488,78 @@ void
 linuxkpi_ieee80211_handle_wake_tx_queue(struct ieee80211_hw *hw, struct ieee80211_txq *queue)
 {
 }
+
+/*
+ * mac80211's queues of frames per station and class, which ath10k pulls from when told there are some: nothing is ever
+ * put in them here -- the station hands every frame to the driver's tx() as it comes -- so there is never anything to
+ * pull, and the driver's own flow control (stop and wake one queue) has nothing to hold back.
+ */
+void
+linuxkpi_ieee80211_stop_queue(struct ieee80211_hw *hw, int queue)
+{
+}
+
+void
+linuxkpi_ieee80211_wake_queue(struct ieee80211_hw *hw, int queue)
+{
+}
+
+void
+linuxkpi_ieee80211_txq_schedule_start(struct ieee80211_hw *hw, uint8_t ac)
+{
+}
+
+struct ieee80211_txq *
+linuxkpi_ieee80211_next_txq(struct ieee80211_hw *hw, uint8_t ac)
+{
+	return (NULL);
+}
+
+void
+linuxkpi_ieee80211_schedule_txq(struct ieee80211_hw *hw, struct ieee80211_txq *txq, bool withoutpkts)
+{
+}
+
+struct sk_buff *
+linuxkpi_ieee80211_tx_dequeue(struct ieee80211_hw *hw, struct ieee80211_txq *txq)
+{
+	return (NULL);
+}
+
+void
+linuxkpi_ieee80211_txq_get_depth(struct ieee80211_txq *txq, unsigned long *frames, unsigned long *bytes)
+{
+	if (frames != NULL) {
+		*frames = 0;
+	}
+	if (bytes != NULL) {
+		*bytes = 0;
+	}
+}
+
+/* the traffic class of a QoS data frame (its QoS field's low four bits; 0 for others) */
+uint8_t
+linuxkpi_ieee80211_get_tid(struct ieee80211_hdr *hdr, bool nonqos_ok)
+{
+	const uint8_t *f = (const uint8_t *)hdr;
+	unsigned control = f[0] | f[1] << 8, at = 24;
+
+	if ((control & 0x008c) != 0x0088) {		/* (data, with the QoS subtype bit) */
+		return (0);
+	}
+	at += (control & 0x0300) == 0x0300 ? 6 : 0;
+	return (f[at] & 0x0f);
+}
+
+/* what the driver reports of a received frame's rate, which nothing here shows */
+uint32_t
+linuxkpi_cfg80211_calculate_bitrate(struct rate_info *rate)
+{
+	return (0);
+}
+
+/* LLC and SNAP of an Ethernet type in 802.11 (RFC 1042) */
+const uint8_t rfc1042_header[6] = { 0xaa, 0xaa, 0x03, 0x00, 0x00, 0x00 };
 
 void
 linuxkpi_ieee80211_tx_status(struct ieee80211_hw *hw, struct sk_buff *skb)

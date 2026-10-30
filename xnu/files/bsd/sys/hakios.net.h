@@ -25,7 +25,8 @@
 #include <sys/kpi_mbuf.h>
 
 #define HAKIOS_NET_FRAME_MAX   1514
-#define HAKIOS_NET_UNITS       2       /* en0: the radio (or virtio); en1: the modem's packets (hakios.cell.c) */
+#define HAKIOS_NET_UNITS       3       /* en0: the radio (or virtio); en1: the modem's packets (hakios.cell.c); en2: the
+	                                 * USB cable where the radio is en0 (hakios.usbnet.c) */
 
 struct hakios_net_link {
 	const char *    name;           /* for the log */

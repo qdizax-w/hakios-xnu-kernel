@@ -3543,6 +3543,34 @@ qrtr_close(struct hakios_qrtr_port *port)
 
 static const struct hakios_qrtr_ops qrtr_ops = { .open = qrtr_open, .send = qrtr_send, .lookup = qrtr_lookup, .close = qrtr_close };
 
+/*
+ * The SoC's serial number (SMEM item 137, "socinfo", from its version 0.10 on: the word at 96), which miatoll's radio
+ * makes its address of when the kernel is given none (drivers/wifi/hakios.wifi.c). The item is in the global
+ * partition, or with an older SMEM in the table of the global heap (Linux's smem.c: qcom_smem_get_global()). False if
+ * there is none to read.
+ */
+#define ITEM_SOCINFO            137
+#define SMEM_LEGACY_TOC         204             /* the global heap's table: after proc_comm[4], version[32] and 3 words */
+
+bool
+hakios_mpss_soc_serial(uint32_t *serial)
+{
+	struct {
+		uint32_t allocated, offset, size, aux_base;
+	} entry;
+	uint32_t size = 0, at = smem_item(ITEM_SOCINFO, &size), format = 0;
+
+	if (at == 0 && smem_peek(SMEM_LEGACY_TOC + 16 * ITEM_SOCINFO, &entry, sizeof(entry)) && entry.allocated != 0 &&
+	    (entry.aux_base & ~3u) == 0) {
+		at = entry.offset;
+		size = entry.size;
+	}
+	if (at == 0 || size < 100 || !smem_peek(at, &format, 4) || format < 10 || !smem_peek(at + 96, serial, 4)) {
+		return false;
+	}
+	return *serial != 0;
+}
+
 /* The modem's QRTR for the rest of the kernel: NULL until the link is up (sys/hakios.qrtr.h). */
 const struct hakios_qrtr_ops *
 hakios_mpss_qrtr(void)
@@ -5500,6 +5528,17 @@ wlfw_thread(__unused void *parameter, __unused wait_result_t result)
 	}
 	printf("mpss: wlfw: %s\n", wlfw_fw_ready ? "THE WI-FI FIRMWARE IS READY" : "the firmware has not said it is ready in 15 s");
 	if (!wlfw_fw_ready) {
+		goto out;
+	}
+
+	/*
+	 * The radio's driver, where the kernel has it and was asked for it (drivers/wifi/hakios.wifi.c, wifi=1): from here on
+	 * the firmware is its. Its own client (ath10k's qmi.c) registers for the indications, hears from the answer that the
+	 * firmware is ready and goes straight on to what follows -- the copy engines' configuration and the mode, which are
+	 * then not sent from here.
+	 */
+	if (hakios_wifi_modem_firmware_ready()) {
+		printf("mpss: wlfw: the firmware is the radio's driver's from here on (ath10k)\n");
 		goto out;
 	}
 

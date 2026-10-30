@@ -919,6 +919,88 @@ linuxkpi_kfree_skb(struct sk_buff *skb)
 	lkpi_kfree(skb->m);
 }
 
+/* A copy of a buffer, data and description, in a buffer of its own (ath10k: frames it hands up twice). */
+struct sk_buff *
+linuxkpi_skb_copy(const struct sk_buff *skb, gfp_t gfp)
+{
+	struct sk_buff *copy = linuxkpi_dev_alloc_skb(skb_headroom(skb) + skb->len, gfp);
+
+	if (copy == NULL) {
+		return (NULL);
+	}
+	skb_reserve(copy, skb_headroom(skb));
+	memcpy(skb_put(copy, skb->len), skb->data, skb->len);
+	memcpy(copy->cb, skb->cb, sizeof(copy->cb));
+	copy->priority = skb->priority;
+	copy->protocol = skb->protocol;
+	return (copy);
+}
+
+/* ---- time, as FreeBSD's kernel has it under LinuxKPI's headers ----------------------------------------- */
+
+/* udelay(), mdelay(): a wait that does not sleep */
+void
+DELAY(int usec)
+{
+	unsigned long long until = lx_os_nanoseconds() + (unsigned long long)(usec < 0 ? 0 : usec) * 1000ull;
+
+	while (lx_os_nanoseconds() < until) {
+	}
+}
+
+/* msleep(), usleep_range(): a wait that sleeps; the time is seconds in 32.32 fixed point */
+int
+pause_sbt(const char *wmesg, sbintime_t sbt, sbintime_t pr, int flags)
+{
+	unsigned long long ns = (unsigned long long)((sbt < 0 ? 0 : sbt) >> 16) * 1000000000ull >> 16;
+
+	lx_os_lock();
+	(void)lx_os_sleep(&ns, ns == 0 ? 1 : ns);
+	lx_os_unlock();
+	return (0);
+}
+
+void
+nanouptime(struct timespec *ts)
+{
+	unsigned long long ns = lx_os_nanoseconds();
+
+	ts->tv_sec = (time_t)(ns / 1000000000ull);
+	ts->tv_nsec = (long)(ns % 1000000000ull);
+}
+
+/* a lock made at a module's load (DEFINE_SPINLOCK): there is no load; the layer's locks work from all zeros */
+void
+mtx_sysinit(const void *argument)
+{
+}
+
+int
+device_printf(device_t dev, const char *format, ...)
+{
+	char line[320];
+	va_list list;
+
+	va_start(list, format);
+	vsnprintf(line, sizeof(line), format, list);
+	va_end(list);
+	printf("lx: %s", line);
+	return (0);
+}
+
+/* the masks of the addresses a device can reach: whatever they are, the radio's memory is the pool's */
+int
+linux_dma_tag_init(struct device *dev, u64 mask)
+{
+	return (0);
+}
+
+int
+linux_dma_tag_init_coherent(struct device *dev, u64 mask)
+{
+	return (0);
+}
+
 /* ---- firmware files ---------------------------------------------------------------------------- */
 
 int

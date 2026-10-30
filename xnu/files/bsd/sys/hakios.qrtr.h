@@ -45,5 +45,7 @@ struct hakios_qrtr_ops {
 
 /* The transport there is; NULL takes it away (handles made before keep the one they were made with). */
 void hakios_qmi_set_transport(const struct hakios_qrtr_ops *ops);
+/* The modem's QRTR (drivers/modem/hakios.mpss.c): NULL until its link is up, and in a kernel without the modem's driver. */
+const struct hakios_qrtr_ops *hakios_mpss_qrtr(void);
 
 #endif /* _SYS_HAKIOS_QRTR_H_ */

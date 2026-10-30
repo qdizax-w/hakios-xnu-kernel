@@ -5,6 +5,10 @@ cd "$XNU_SRC" || exit 1
 # The Wi-Fi driver's object (tools/mk-ath11k.sh) is linked into the kernel when it is there; make
 # does not see it change, so the linked kernel is thrown away when it has.
 LX=$XNUDEPS/build/ath11k/out/ath11k.o
+# (miatoll's radio is a WCN3990: ath10k's object, tools/mk-ath10k.sh)
+if [ -f config/MASTER.hakios ] && grep -q '^#  HAKIOS_DRIVERS = \[.* hakios_miatoll_' config/MASTER.hakios; then
+	LX=$XNUDEPS/build/ath10k/out/ath10k.o
+fi
 # ... only into a kernel that has the Wi-Fi driver (CONFIG_HAKIOS_WIFI): the object's calls are answered by hakios.lx.c
 if [ -f config/MASTER.hakios ] && ! grep -q '^#  HAKIOS_DRIVERS = \[.* hakios_wifi ' config/MASTER.hakios; then LX=/nonexistent; fi
 STAMP=BUILD/obj/hakios-objects

@@ -1,6 +1,6 @@
 /*
- * The phone's USB port as the link behind en0 (sys/hakios.net.h): plugged into a computer, the
- * phone is a USB Ethernet adapter (CDC-ECM, which Linux's cdc_ether and macOS drive with no driver
+ * The phone's USB port as the link behind en0 (en2 where the radio is up, wifi=1: sys/hakios.net.h): plugged into a
+ * computer, the phone is a USB Ethernet adapter (CDC-ECM, which Linux's cdc_ether and macOS drive with no driver
  * of their own), and the computer can share its connection over it. Boot-arg usbnet=1, miatoll only.
  *
  * The controller is a Synopsys DWC3 at 0x0a600000 behind Qualcomm's wrapper. The firmware leaves it
@@ -299,7 +299,7 @@ ud_link(bool up)
 	if (up != ud.link) {
 		ud.link = up;
 		printf("usbnet: the cable's link is %s\n", up ? "up" : "down");
-		hakios_net_link_state(up);
+		hakios_net_link_state_unit(ud_net_link.unit, up);
 	}
 }
 
@@ -442,7 +442,7 @@ ud_rx_done(void)
 	if (len >= ETHER_HDR_LEN) {
 		/* (a frame of a multiple of 512 bytes comes with a byte more, instead of a packet of none) */
 		ud.received++;
-		hakios_net_input((const uint8_t *)(ud.dma + UD_RX), len > HAKIOS_NET_FRAME_MAX ? HAKIOS_NET_FRAME_MAX : len);
+		hakios_net_input_unit(ud_net_link.unit, (const uint8_t *)(ud.dma + UD_RX), len > HAKIOS_NET_FRAME_MAX ? HAKIOS_NET_FRAME_MAX : len);
 	}
 	if (ud.configured) {
 		ud_rx_arm();
@@ -718,7 +718,7 @@ ud_own_address(void)
 		return false;           /* (the network stack is not up yet) */
 	}
 	bzero(&ifr, sizeof(ifr));
-	strlcpy(ifr.ifr_name, "en0", sizeof(ifr.ifr_name));
+	snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "en%u", ud_net_link.unit);
 	up = sock_ioctl(so, SIOCGIFFLAGS, &ifr);
 	if (up != 0) {
 		sock_close(so);
@@ -737,13 +737,13 @@ ud_own_address(void)
 		int attached;
 
 		bzero(&ifr, sizeof(ifr));
-		strlcpy(ifr.ifr_name, "en0", sizeof(ifr.ifr_name));
+		snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "en%u", ud_net_link.unit);
 		attached = sock_ioctl(so, SIOCPROTOATTACH, &ifr);
-		printf("usbnet: IPv4 attached to en0 (%d)\n", attached);
+		printf("usbnet: IPv4 attached to en%u (%d)\n", ud_net_link.unit, attached);
 	}
 #endif
 	bzero(&ifra, sizeof(ifra));
-	strlcpy(ifra.ifra_name, "en0", sizeof(ifra.ifra_name));
+	snprintf(ifra.ifra_name, sizeof(ifra.ifra_name), "en%u", ud_net_link.unit);
 	sin = (struct sockaddr_in *)&ifra.ifra_addr;
 	sin->sin_len = sizeof(*sin);
 	sin->sin_family = AF_INET;
@@ -758,8 +758,8 @@ ud_own_address(void)
 	sin->sin_addr.s_addr = htonl(0xa9feffff);
 	added = sock_ioctl(so, SIOCAIFADDR, &ifra);
 	sock_close(so);
-	printf("usbnet: en0 up (%d) with an address of its own, 169.254.42.42 (%d): the log and the screen are there from now on\n",
-	    up, added);
+	printf("usbnet: en%u up (%d) with an address of its own, 169.254.42.42 (%d): the log and the screen are there from now on\n",
+	    ud_net_link.unit, up, added);
 	return true;
 }
 
@@ -805,7 +805,7 @@ ud_serve(void *arg __unused, wait_result_t wr __unused)
 	}
 }
 
-static const struct hakios_net_link ud_net_link = {
+static struct hakios_net_link ud_net_link = {
 	.name = "USB (CDC-ECM)",
 	.address = { 0x02, 0x00, 0x5e, 0x77, 0xee, 0x02 },
 	.wireless = false,
@@ -906,6 +906,7 @@ void
 hakios_usbnet_init(void)
 {
 	int enabled = 0;
+	uint32_t wifi = 0;
 
 	if (!PE_parse_boot_argn("usbnet", &enabled, sizeof(enabled)) || !enabled) {
 		return;
@@ -914,8 +915,16 @@ hakios_usbnet_init(void)
 		printf("usbnet: usbnet=1 is for miatoll's USB controller only\n");
 		return;
 	}
+	/*
+	 * en0 is the radio's where the kernel brings the radio up (wifi=1): iOS's Wi-Fi is en0. The cable is then en2, with the
+	 * same address of its own (169.254.42.42) for the log and the screen; usbnet_unit=N says otherwise.
+	 */
+	if (PE_parse_boot_argn("wifi", &wifi, sizeof(wifi)) && wifi != 0) {
+		ud_net_link.unit = 2;
+	}
+	PE_parse_boot_argn("usbnet_unit", &ud_net_link.unit, sizeof(ud_net_link.unit));
 	if (!hakios_net_attach(&ud_net_link)) {
-		printf("usbnet: en0 is taken by another link\n");
+		printf("usbnet: en%u is taken by another link\n", ud_net_link.unit);
 		return;
 	}
 	if (!ud_start()) {
