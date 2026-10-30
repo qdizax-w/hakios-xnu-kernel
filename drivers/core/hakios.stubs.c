@@ -51,6 +51,7 @@ void hakios_miatoll_battery_init(void) {}
 
 #ifndef HAKIOS_MIATOLL_BACKLIGHT
 void hakios_miatoll_backlight_init(void) {}
+void hakios_display_power(__unused int on) {}
 #endif
 
 #ifndef HAKIOS_BUTTONS

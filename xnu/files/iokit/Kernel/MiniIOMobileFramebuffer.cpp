@@ -51,6 +51,8 @@ extern "C" int hakios_display_scan_start(void);
 extern "C" const struct hakios_display_scan * hakios_display_scan(void);
 extern "C" int hakios_display_wait_lines(uint32_t first, uint32_t last, uint64_t limit_ns);
 extern "C" uint64_t hakios_display_next_frame_ns(void);
+/* the panel lit or dark as iOS asks (the screen locked and off): the device's backlight driver, a stub elsewhere */
+extern "C" void hakios_display_power(int on);
 
 /* IOConnectCallMethod selectors of the framebuffer user client (iOS 16.5) */
 enum {
@@ -1507,10 +1509,19 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
 			    args->scalarInputCount > 1 ? in[1] : 0, args->scalarInputCount > 2 ? in[2] : 0, micros(mach_absolute_time()));
 		}
 		return kIOReturnSuccess;
+	case kFBMethodRequestPowerChange:               /* in: 0 the display off (the screen locked and dark), 1 on */
+		if (args->scalarInputCount > 0) {
+			static int said;
+
+			if (said++ < 8) {
+				IOLog("MiniIOMobileFramebuffer: iOS asks for the display %s\n", in[0] ? "on" : "off");
+			}
+			hakios_display_power(in[0] != 0);
+		}
+		return kIOReturnSuccess;
 	case kFBMethodSwapSignal:
 	case kFBMethodSwapCancel:
 	case kFBMethodSwapCancelAll:
-	case kFBMethodRequestPowerChange:
 	case kFBMethodChangeFrameInfo:
 		return kIOReturnSuccess;
 
