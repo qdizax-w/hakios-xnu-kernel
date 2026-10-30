@@ -46,6 +46,8 @@ extern void FlushPoC_DcacheRegion(vm_offset_t va, size_t length);   /* osfmk/arm
 
 #define MIATOLL_SOC_BASE        0x00100000ul
 
+static struct hakios_net_link ud_net_link;      /* (en0's or en2's: further down, with its transmit) */
+
 #define GCC_PA                  0x00100000
 #define GCC_SIZE                0x00090000
 #define GCC_USB30_PRIM_GDSCR    0x0f004         /* bit 31: the power domain is on */
