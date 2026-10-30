@@ -1346,7 +1346,7 @@ watch(int seconds)
 				return ok;
 			}
 			if (soon) {
-				printf("var_store: saved as the kernel asked (power and volume down)\n");
+				printf("var_store: saved as the kernel asked (a button held, or the screen locked)\n");
 				(void)sysctl_set_int("kern.hakios.var_save", VAR_SAVE_IDLE);
 			}
 		}

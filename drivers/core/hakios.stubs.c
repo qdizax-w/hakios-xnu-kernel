@@ -64,6 +64,7 @@ void hakios_ufs_report(__unused const char *when) {}
 bool hakios_ufs_dev(__unused dev_t dev) { return false; }
 void hakios_ufs_quiesce(void) {}
 void hakios_var_save_on_return(void) {}         /* no flash, so no data volume to save into it */
+void hakios_var_save_soon(void) {}
 #endif
 
 #ifndef HAKIOS_VIRTIO_BLK

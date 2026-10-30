@@ -328,6 +328,30 @@ button_look(struct button *b, bool pressed)
 	}
 }
 
+/*
+ * The power button held for 1.5 s: the data volume saved while there is time. A phone held that way is often on its way to
+ * the PMIC's own reset (some 10 s of power held, the way to leave a frozen or finished run on miatoll), which nothing here
+ * sees coming and after which the volume would be what the last save left; a save takes a few seconds, most of it
+ * unchanged blocks left alone.
+ */
+static void
+power_held_look(void)
+{
+	static bool asked;
+	uint64_t held;
+
+	if (!power.down || !power.live) {
+		asked = false;
+		return;
+	}
+	absolutetime_to_nanoseconds(mach_absolute_time() - power.since, &held);
+	if (!asked && held >= 1500 * NSEC_PER_MSEC) {
+		asked = true;
+		printf("buttons: the power button held for 1.5 s: the data volume is saved now\n");
+		hakios_var_save_soon();
+	}
+}
+
 /* One look at both peripherals. */
 static void
 buttons_poll(void)
@@ -341,6 +365,7 @@ buttons_poll(void)
 		if (problem == NULL) {
 			button_look(&power, status & pon_kpdpwr);
 			button_look(&volume_down, status & pon_resin);
+			power_held_look();
 		} else if (said < 8) {
 			said++;
 			printf("buttons: reading %s: %s\n", pon.name, problem);

@@ -933,13 +933,16 @@ static const struct cdevsw ufs_cdevsw = {
  * so twenty seconds here is well inside both. Nothing else of the way out has happened yet: the
  * GPU, the DSPs and this kernel's transfer list are still as the run had them.
  */
-/* A save now, if a saver is there and is not saving already (bsd/dev/hakios.buttons.c) */
+/*
+ * A save now, if a saver is there and is not saving already: power and volume down, or the power button held
+ * (bsd/dev/hakios.buttons.c), or the display going off as iOS locks the screen (the device's backlight driver).
+ */
 void
 hakios_var_save_soon(void)
 {
 	if (ufs_ready && ufs_write_part >= 0 && ufs_var_save == VAR_SAVE_IDLE) {
 		ufs_var_save = VAR_SAVE_SOON;
-		printf("var_store: power and volume down held: the data volume is asked for now\n");
+		printf("var_store: the data volume is asked for now\n");
 	}
 }
 
