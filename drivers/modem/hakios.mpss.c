@@ -5185,6 +5185,31 @@ ipa_qmi_stop(void)
 #define WLFW_MSA_INFO           0x002d
 #define WLFW_MSA_READY          0x002e
 #define WLFW_HOST_CAP           0x0034
+#define WLFW_WLAN_MODE          0x0022
+#define WLFW_WLAN_CFG           0x0023
+#define WLFW_MODE_MISSION       0
+#define WLFW_MODE_OFF           4
+
+/*
+ * The radio's copy engines as ath10k's snoc.c configures them for the WCN3990 (target_ce_config_wlan,
+ * target_service_to_ce_map_wlan, target_shadow_reg_cfg_map): numbers only. A pipe: its number, its direction (1 in, 2 out,
+ * 3 both, 4 the host's alone), entries, the largest transfer, flags (8: no interrupt). A service: its HTC id, direction, pipe.
+ * A shadow register: a copy engine and the offset of its write index (0x3c the source ring's, 0x40 the destination's).
+ */
+static const uint32_t wlfw_pipes[][5] = {
+	{ 0, 2, 32, 2048, 0 }, { 1, 1, 32, 2048, 0 }, { 2, 1, 64, 2048, 0 }, { 3, 2, 32, 2048, 0 }, { 4, 2, 256, 256, 8 },
+	{ 5, 2, 1024, 64, 8 }, { 6, 3, 32, 16384, 0 }, { 7, 4, 0, 0, 8 }, { 8, 1, 32, 2048, 0 }, { 9, 1, 32, 2048, 0 },
+	{ 10, 1, 32, 2048, 0 }, { 11, 1, 32, 2048, 0 },
+};
+static const uint32_t wlfw_services[][3] = {
+	{ 0x104, 2, 3 }, { 0x104, 1, 2 }, { 0x102, 2, 3 }, { 0x102, 1, 2 }, { 0x101, 2, 3 }, { 0x101, 1, 2 }, { 0x103, 2, 3 },
+	{ 0x103, 1, 2 }, { 0x100, 2, 3 }, { 0x100, 1, 2 }, { 0x001, 2, 0 }, { 0x001, 1, 2 }, { 0xfe00, 2, 0 }, { 0xfe00, 1, 2 },
+	{ 0x300, 2, 4 }, { 0x300, 1, 1 }, { 0xfe00, 2, 5 }, { 0x301, 1, 9 }, { 0x302, 1, 10 }, { 0x600, 1, 11 }, { 0, 0, 0 },
+};
+static const uint16_t wlfw_shadow[][2] = {
+	{ 0, 0x3c }, { 3, 0x3c }, { 4, 0x3c }, { 5, 0x3c }, { 7, 0x3c }, { 1, 0x40 }, { 2, 0x40 }, { 7, 0x40 }, { 8, 0x40 },
+	{ 9, 0x40 }, { 10, 0x40 }, { 11, 0x40 },
+};
 #define WLFW_CLIENT_ID          0x4b4e454cu     /* ath10k's ATH10K_QMI_CLIENT_ID: "LENK" */
 #define WLFW_MSA_PA             0x93900000ull
 #define WLFW_MSA_SIZE           0x00200000u
@@ -5473,8 +5498,76 @@ wlfw_thread(__unused void *parameter, __unused wait_result_t result)
 	for (unsigned ms = 0; ms < 15000 && !wlfw_fw_ready; ms += 10) {
 		sleep_ms(10);
 	}
-	printf("mpss: wlfw: %s\n", wlfw_fw_ready ? "THE WI-FI FIRMWARE IS READY: the radio's driver (ath10k snoc) is what comes next" :
-	    "the firmware has not said it is ready in 15 s");
+	printf("mpss: wlfw: %s\n", wlfw_fw_ready ? "THE WI-FI FIRMWARE IS READY" : "the firmware has not said it is ready in 15 s");
+	if (!wlfw_fw_ready) {
+		goto out;
+	}
+
+	/*
+	 * wlfw_mission=1 (on miatoll by default): what ath10k's snoc.c asks next (ath10k_qmi_wlan_enable()): the copy engines'
+	 * configuration -- pipes, services, shadow registers -- and the mode "mission", after which the firmware has the radio
+	 * on. The radio's registers are not touched here yet: its rails (dt: vdd-1.3-rfa, vdd-3.3-ch0/1, vdd-1.8-xo) are as the
+	 * boot loader left them, and a read of a block that is off hangs the core.
+	 */
+	{
+		uint32_t mission = bells_apcs ? 1 : 0;
+		unsigned n;
+
+		PE_parse_boot_argn("wlfw_mission", &mission, sizeof(mission));
+		if (mission == 0) {
+			goto out;
+		}
+		at = 0;
+		n = sizeof(wlfw_pipes) / sizeof(wlfw_pipes[0]);
+		tlvs[at++] = 0x11;
+		tlvs[at++] = (uint8_t)(1 + 20 * n);
+		tlvs[at++] = (uint8_t)((1 + 20 * n) >> 8);
+		tlvs[at++] = (uint8_t)n;
+		for (unsigned i = 0; i < n; i++) {
+			for (unsigned w = 0; w < 5; w++) {
+				for (unsigned b = 0; b < 4; b++) {
+					tlvs[at++] = (uint8_t)(wlfw_pipes[i][w] >> (8 * b));
+				}
+			}
+		}
+		n = sizeof(wlfw_services) / sizeof(wlfw_services[0]);
+		tlvs[at++] = 0x12;
+		tlvs[at++] = (uint8_t)(1 + 12 * n);
+		tlvs[at++] = (uint8_t)((1 + 12 * n) >> 8);
+		tlvs[at++] = (uint8_t)n;
+		for (unsigned i = 0; i < n; i++) {
+			for (unsigned w = 0; w < 3; w++) {
+				for (unsigned b = 0; b < 4; b++) {
+					tlvs[at++] = (uint8_t)(wlfw_services[i][w] >> (8 * b));
+				}
+			}
+		}
+		n = sizeof(wlfw_shadow) / sizeof(wlfw_shadow[0]);
+		tlvs[at++] = 0x13;
+		tlvs[at++] = (uint8_t)(1 + 4 * n);
+		tlvs[at++] = (uint8_t)((1 + 4 * n) >> 8);
+		tlvs[at++] = (uint8_t)n;
+		for (unsigned i = 0; i < n; i++) {
+			tlvs[at++] = (uint8_t)wlfw_shadow[i][0];
+			tlvs[at++] = (uint8_t)(wlfw_shadow[i][0] >> 8);
+			tlvs[at++] = (uint8_t)wlfw_shadow[i][1];
+			tlvs[at++] = (uint8_t)(wlfw_shadow[i][1] >> 8);
+		}
+		if (!wlfw_ask("the copy engines' configuration (12 pipes, 21 services, 12 shadow registers)", WLFW_WLAN_CFG, tlvs, at)) {
+			goto out;
+		}
+		at = qmi_put_u32(tlvs, 0x01, WLFW_MODE_MISSION);
+		if (!wlfw_ask("the mode: mission", WLFW_WLAN_MODE, tlvs, at)) {
+			goto out;
+		}
+		printf("mpss: wlfw: THE WI-FI FIRMWARE IS IN MISSION MODE: the radio's driver (ath10k snoc: copy engines, HTC, WMI) "
+		    "is what comes next\n");
+		/* (watched for a while: a firmware that gives up on the radio's rails takes the modem with it) */
+		for (unsigned s = 0; s < 20 && wlfw_there; s++) {
+			sleep_ms(1000);
+		}
+		printf("mpss: wlfw: 20 s after mission mode the firmware's service is %s\n", wlfw_there ? "still there" : "GONE");
+	}
 out:
 	thread_terminate(current_thread());
 }
