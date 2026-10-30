@@ -936,6 +936,36 @@ linuxkpi_skb_copy(const struct sk_buff *skb, gfp_t gfp)
 	return (copy);
 }
 
+/* ---- memory for a device's lifetime (devm_kzalloc() and the rest): nothing here removes a device but the end of the run ---- */
+
+void *
+lkpi_devres_alloc(void (*release)(struct device *, void *), size_t size, gfp_t gfp)
+{
+	return (lkpi_kmalloc(size, gfp | __GFP_ZERO));
+}
+
+void
+lkpi_devres_add(struct device *dev, void *p)
+{
+}
+
+void
+lkpi_devres_free(void *p)
+{
+	lkpi_kfree(p);
+}
+
+void
+lkpi_devm_kmalloc_release(struct device *dev, void *p)
+{
+}
+
+void
+lkpi_devm_kfree(struct device *dev, const void *p)
+{
+	lkpi_kfree(p);
+}
+
 /* ---- time, as FreeBSD's kernel has it under LinuxKPI's headers ----------------------------------------- */
 
 /* udelay(), mdelay(): a wait that does not sleep */
