@@ -5121,7 +5121,15 @@ ipa_client_server(__unused void *context, bool arrived, uint32_t service, __unus
 static bool
 ipa_qmi_start(void)
 {
-	if (option("modem_no_ipa_qmi")) {
+	/*
+	 * (on miatoll not unless modem_no_ipa_qmi=0: its IPA is v4.2, without the hashed tables and with another layout than
+	 * the v4.11 one sent below, and its modem gave up on what it was told: "ipa_qmi_server.c:418: IPA Assert:
+	 * (init_req->v4_hash_route_tbl_info_valid == 0) ..."; the IPA is not run there, and Wi-Fi does not need it)
+	 */
+	uint32_t off = bells_apcs ? 1 : 0;
+
+	PE_parse_boot_argn("modem_no_ipa_qmi", &off, sizeof(off));
+	if (off != 0) {
 		return false;
 	}
 	if (ipa_host_port == NULL) {
