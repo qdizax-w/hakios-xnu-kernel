@@ -51,6 +51,11 @@ extern "C" int hakios_display_scan_start(void);
 extern "C" const struct hakios_display_scan * hakios_display_scan(void);
 extern "C" int hakios_display_wait_lines(uint32_t first, uint32_t last, uint64_t limit_ns);
 extern "C" uint64_t hakios_display_next_frame_ns(void);
+/* double buffering: page flips on the display controller (miatoll, fb_flip; bsd/dev/hakios.display.c) */
+extern "C" int hakios_display_flip_start(uint8_t * base, uint32_t row_bytes, uint32_t height, uint8_t ** front);
+extern "C" uint8_t * hakios_display_flip_back(uint64_t limit_ns);
+extern "C" uint8_t * hakios_display_flip_front(void);
+extern "C" void hakios_display_flip_show(void);
 /* the panel lit or dark as iOS asks (the screen locked and off): the device's backlight driver, a stub elsewhere */
 extern "C" void hakios_display_power(int on);
 
@@ -251,6 +256,14 @@ class IOMobileFramebuffer : public IOService
 public:
 	IOLock *        fLock;
 	uint8_t *       fBase;                  /* the boot framebuffer: the panel */
+	/*
+	 * With double buffering (fFlip): a frame that covers the whole panel is drawn into the buffer not being
+	 * sent and flipped to at a frame start, so it is never shown half drawn; any other is drawn in place.
+	 * fTarget is where the frame being drawn goes (drawRows()).
+	 */
+	bool            fFlip;
+	uint8_t *       fTarget;
+	uint32_t        fStatFlips;             /* frames flipped to (the rest drawn in place) */
 	uint32_t        fPanelWidth, fPanelHeight, fRowBytes;
 	uint32_t        fWidth, fHeight;        /* the display as user space sees it */
 	MiniIOSurface * fDefaultSurface;
@@ -328,6 +341,8 @@ public:
 	static void presenterMain(void * self, wait_result_t result);
 	void reportFrameTimes(void);
 	void drawLayer(MiniIOSurface * s, const int32_t * src, const int32_t * dst);
+	bool coversPanel(MiniIOSurface * s, const int32_t * src, const int32_t * dst);
+	bool wholeFrame(const uint8_t * swap, MiniIOSurface ** surfaces);
 	void drawRows(const struct RowJob * job, int32_t y0, int32_t y1, uint32_t * blendRow);
 	static void helperMain(void * self, wait_result_t result);
 	/* the scaling shared out (fb_threads): fThreads drawers, the presenter and fThreads - 1 helpers */
@@ -448,6 +463,16 @@ IOMobileFramebuffer::start(IOService * provider)
 	fPanelWidth = vinfo.v_width;
 	fPanelHeight = vinfo.v_height;
 	fRowBytes = vinfo.v_rowbytes;
+	fTarget = fBase;
+	{
+		uint8_t * front = NULL;
+
+		if (hakios_display_flip_start(fBase, fRowBytes, fPanelHeight, &front)) {
+			fFlip = true;
+			fBase = fTarget = front;
+			IOLog("MiniIOMobileFramebuffer: double buffered: whole frames are flipped to at the panel's frame start\n");
+		}
+	}
 	fWidth = gFBWidth ? gFBWidth : fPanelWidth;
 	fHeight = gFBHeight ? gFBHeight : fPanelHeight;
 	if (gFBScale != 0 && gFBScale != kFBDefaultScale) {
@@ -687,7 +712,7 @@ IOMobileFramebuffer::drawRows(const RowJob * job, int32_t y0, int32_t y1, uint32
 		if (y < 0 || (uint32_t) y >= fPanelHeight) {
 			continue;
 		}
-		to = (uint32_t *) (fBase + (size_t) y * fRowBytes);
+		to = (uint32_t *) (fTarget + (size_t) y * fRowBytes);
 		if (job->unscaled) {
 			/* not scaled at all */
 			memcpy(to + px0, pixels + (size_t) (sy + y - py0) * stride + (size_t) sx * 4, (size_t) sw * 4);
@@ -791,6 +816,74 @@ IOMobileFramebuffer::helperMain(void * self, wait_result_t result __unused)
  * panel may be of another size, and the layer itself may be scaled: both are done in one
  * step, bilinear (or nearest neighbour: fb_filter=0).
  */
+/*
+ * Will drawLayer() fill the whole panel with this layer? The same checks as it makes, in the same order:
+ * a layer it would leave out, or that leaves any of the panel uncovered, is not.
+ */
+bool
+IOMobileFramebuffer::coversPanel(MiniIOSurface * s, const int32_t * src, const int32_t * dst)
+{
+	int32_t sx = src[0], sy = src[1], sw = src[2], sh = src[3];
+	int32_t dx = dst[0], dy = dst[1], dw = dst[2], dh = dst[3];
+
+	if (s == NULL || s->info.bytesPerElement != 4 || s->info.planeCount != 0) {
+		return false;
+	}
+	if (sw <= 0 || sh <= 0) {
+		sx = sy = 0;
+		sw = (int32_t) s->info.width;
+		sh = (int32_t) s->info.height;
+	}
+	if (dw <= 0 || dh <= 0) {
+		dx = dy = 0;
+		dw = (int32_t) fWidth;
+		dh = (int32_t) fHeight;
+	}
+	if (sx < 0 || sy < 0 || (uint32_t) (sx + sw) > s->info.width || (uint32_t) (sy + sh) > s->info.height) {
+		return false;
+	}
+	if (!surfaceHolds(s, (uint32_t) (sy + sh), (uint32_t) (sx + sw))) {
+		return false;
+	}
+	int64_t qx0 = (int64_t) dx * fPanelWidth / fWidth;
+	int64_t qy0 = (int64_t) dy * fPanelHeight / fHeight;
+	int64_t qx1 = ((int64_t) dx + dw) * fPanelWidth / fWidth;
+	int64_t qy1 = ((int64_t) dy + dh) * fPanelHeight / fHeight;
+
+	if (qx0 < -DST_LIMIT || qy0 < -DST_LIMIT || qx1 > DST_LIMIT || qy1 > DST_LIMIT) {
+		return false;
+	}
+	return qx0 <= 0 && qy0 <= 0 && qx1 >= (int64_t) fPanelWidth && qy1 >= (int64_t) fPanelHeight;
+}
+
+/*
+ * Does this swap paint every pixel of the panel (so that it may go into the other buffer, which holds the
+ * frame before last)? It does when one of its layers covers the panel -- the ones under it are painted over
+ * -- or when the bottom layer is taken away, which blacks out the whole panel first.
+ */
+bool
+IOMobileFramebuffer::wholeFrame(const uint8_t * swap, MiniIOSurface ** surfaces)
+{
+	uint32_t set = swapWord(swap, SWAP_LAYERS_SET);
+
+	for (unsigned layer = 0; layer < SWAP_LAYERS; layer++) {
+		int32_t src[4], dst[4];
+
+		if (swapWord(swap, SWAP_SURFACE(layer)) == 0) {
+			if (layer == 0 && (set & 1) && fGraphics) {
+				return true;
+			}
+			continue;
+		}
+		memcpy(src, swap + SWAP_SOURCE(layer), sizeof(src));
+		memcpy(dst, swap + SWAP_DEST(layer), sizeof(dst));
+		if (coversPanel(surfaces[layer], src, dst)) {
+			return true;
+		}
+	}
+	return false;
+}
+
 void
 IOMobileFramebuffer::drawLayer(MiniIOSurface * s, const int32_t * src, const int32_t * dst)
 {
@@ -1048,7 +1141,26 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 	}
 	fStatWaiting += mach_absolute_time() - began;
 	began = ready = mach_absolute_time();
-	if (hakios_display_scan() != NULL) {
+	/*
+	 * Double buffered: a whole frame goes into the buffer not being sent, once the last flip has been taken
+	 * (a frame start: this is the wait for the refresh), and is flipped to when it is all there. No place
+	 * in the scan to wait for: nothing it draws is sent before the flip. Anything else is drawn in place.
+	 */
+	uint8_t * back = NULL;
+
+	if (fFlip) {
+		const struct hakios_display_scan * scan = hakios_display_scan();
+		uint64_t limit = scan != NULL ? scan->frame_ns * 2 : 2 * NSEC_PER_SEC / refreshHz();
+
+		if (wholeFrame(swap, surfaces)) {
+			back = hakios_display_flip_back(limit);
+		}
+		fTarget = back != NULL ? back : hakios_display_flip_front();
+	}
+	if (back != NULL) {
+		fStatFlips++;
+		fBeat = began = mach_absolute_time();
+	} else if (hakios_display_scan() != NULL) {
 		/*
 		 * Where the copy may start (fb_scan): every band of rows (fThreads of them, drawn side by side, each top
 		 * to bottom in about fDrawNs) has to stay behind the scan in this refresh -- written after the scan has
@@ -1144,7 +1256,7 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 			/* the bottom layer taken away: nothing is shown, the screen is black */
 			if (layer == 0 && (set & 1) && fGraphics) {
 				for (uint32_t y = 0; y < fPanelHeight; y++) {
-					bzero(fBase + (size_t) y * fRowBytes, (size_t) fPanelWidth * 4);
+					bzero(fTarget + (size_t) y * fRowBytes, (size_t) fPanelWidth * 4);
 				}
 			}
 			continue;
@@ -1174,6 +1286,10 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 				recorded = s;   /* (recorded once the frame is in the panel's memory: see below) */
 			}
 		}
+	}
+	if (back != NULL) {
+		hakios_display_flip_show();     /* sent from the next frame start on */
+		fBase = back;
 	}
 	drawn = mach_absolute_time();
 	absolutetime_to_nanoseconds(drawn - began, &nanos);
@@ -1219,6 +1335,11 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 			    "get there in time; %llu us to put a frame into the panel's memory\n", fStatScanWaits - fStatScanMissed,
 			    fStatScanMissed, fDrawNs / NSEC_PER_USEC);
 			fStatScanWaits = fStatScanMissed = 0;
+		}
+		if (fFlip) {
+			IOLog("MiniIOMobileFramebuffer: double buffered: %u of the %u frames flipped to, the rest drawn in place; "
+			    "%llu us to draw a frame\n", fStatFlips, fStatFrames, fDrawNs / NSEC_PER_USEC);
+			fStatFlips = 0;
 		}
 		for (different = 0; different < 8 && fStatSurfaces[different] != 0; different++) {
 		}

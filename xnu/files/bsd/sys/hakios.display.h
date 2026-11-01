@@ -25,6 +25,11 @@ const struct hakios_display_scan *hakios_display_scan(void);  /* NULL without */
 uint32_t hakios_display_line(uint32_t *frame);                 /* the line being sent now (and the frame's number) */
 int hakios_display_wait_lines(uint32_t first, uint32_t last, uint64_t limit_ns);
 uint64_t hakios_display_next_frame_ns(void);                   /* until the next frame's first line */
+/* double buffering (miatoll, fb_flip): see bsd/dev/hakios.display.c */
+int hakios_display_flip_start(uint8_t *base, uint32_t row_bytes, uint32_t height, uint8_t **front);
+uint8_t *hakios_display_flip_back(uint64_t limit_ns);
+uint8_t *hakios_display_flip_front(void);
+void hakios_display_flip_show(void);
 
 #ifdef __cplusplus
 }
