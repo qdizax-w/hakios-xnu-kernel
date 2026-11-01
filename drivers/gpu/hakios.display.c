@@ -272,7 +272,15 @@ hakios_display_scan_start(void)
  * Registers: Linux drivers/gpu/drm/msm/disp/dpu1/dpu_hw_sspp.c, dpu_hw_ctl.c; dt: qcom,sde-sspp-off
  * <0x5000 0x25000 0x27000 0x29000> (VIG0, DMA0..2), qcom,sde-ctl-off <0x2000 0x2200 0x2400>.
  */
-extern vm_offset_t ml_io_map_wcomb(vm_offset_t phys_addr, vm_size_t size);
+/*
+ * The two buffers are mapped as XNU maps the boot framebuffer (video_console.c): write-combined, in the
+ * kernel's map. Not ml_io_map_wcomb(): that takes its addresses from io_submap, which is for registers
+ * and has no room for 2 x 10 MB -- and panics when it has none (the first try, 1 November).
+ */
+extern vm_offset_t ml_io_map_unmappable(vm_offset_t phys_addr, vm_size_t size, uint32_t flags);
+#ifndef VM_WIMG_WCOMB
+#define VM_WIMG_WCOMB           0x6             /* osfmk/arm/memory_types.h: not cacheable, coherent */
+#endif
 extern vm_offset_t ml_vtophys(vm_offset_t vaddr);
 
 #define MDP_PHYS                0x0ae00000UL
@@ -419,8 +427,8 @@ hakios_display_flip_start(uint8_t *base, uint32_t row_bytes, uint32_t height, ui
 	flip.ctl = ctl;
 	flip.pa[0] = pa;
 	flip.pa[1] = pa + size;
-	flip.va[0] = (uint8_t *)ml_io_map_wcomb((vm_offset_t)pa, (vm_size_t)size);
-	flip.va[1] = (uint8_t *)ml_io_map_wcomb((vm_offset_t)(pa + size), (vm_size_t)size);
+	flip.va[0] = (uint8_t *)ml_io_map_unmappable((vm_offset_t)pa, (vm_size_t)size, VM_WIMG_WCOMB);
+	flip.va[1] = (uint8_t *)ml_io_map_unmappable((vm_offset_t)(pa + size), (vm_size_t)size, VM_WIMG_WCOMB);
 	if (flip.va[0] == NULL || flip.va[1] == NULL) {
 		printf("display: no double buffering: the two buffers cannot be mapped\n");
 		flip.pipe = 0;
