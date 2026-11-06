@@ -4014,35 +4014,10 @@ constexpr uint32_t regVfdDestCntlInstr(uint32_t i) { return REG_A6XX_VFD_DEST_CN
 // --- floats in registers -------------------------------------------------------------------------------------------------------
 
 // The bits of a float, as Mesa's fui() (util/u_math.h) gives them to the encoders of the GRAS_CL_VPORT_*, Z_CLAMP,
-// Z_BOUNDS, POLY_OFFSET and BLEND_*_F32 registers. Written out by hand because C++17 has no constexpr bit_cast: the
-// exponent is found by halving or doubling (both exact), the mantissa is what is left below the leading one, scaled
-// by 2^23 (exact: a float has 24 significant bits). A finite value round-trips exactly (tests/a6xx_test.cpp holds it
-// to memcpy); NaN gives the quiet NaN, an infinity 0x7f800000 with its sign.
+// Z_BOUNDS, POLY_OFFSET and BLEND_*_F32 registers. NaN gives the quiet NaN (tests/a6xx_test.cpp holds the rest to memcpy).
+// __builtin_bit_cast, because the iOS cross-compiler's __builtin_signbit is not constexpr.
 constexpr uint32_t fui(float f) {
-    uint32_t sign = __builtin_signbit(f) ? 0x80000000u : 0u;
-    if (f != f) {
-        return 0x7fc00000u;
-    }
-    float a = f < 0 ? -f : f;
-    if (a == 0.0f) {
-        return sign;
-    }
-    if (a > 3.4028234663852886e38f) {
-        return sign | 0x7f800000u;
-    }
-    int e = 127;
-    while (a >= 2.0f) {
-        a *= 0.5f;
-        e++;
-    }
-    while (a < 1.0f && e > 1) {
-        a *= 2.0f;
-        e--;
-    }
-    if (a < 1.0f) {
-        return sign | uint32_t(a * 8388608.0f);   // a denormal: exponent 0, the value is mantissa * 2^-149 = a * 2^-126
-    }
-    return sign | (uint32_t(e) << 23) | uint32_t((a - 1.0f) * 8388608.0f);
+    return f != f ? 0x7fc00000u : __builtin_bit_cast(uint32_t, f);
 }
 
 // GRAS_CL_VPORT[0]'s six words for a Metal viewport, as turnip's tu6_emit_viewport computes them (tu_pipeline.cc:
