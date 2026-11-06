@@ -10,7 +10,7 @@
  *   - exits boot services, turns the MMU off and jumps to the kernel entry
  */
 #include "efi.h"
-#include "identity.h"         /* who iOS shall think we are: from the iPhone's own device tree (mkidentity.py) */
+#include "identity.h"         /* who Darwin shall think we are: from the iPhone's own device tree (mkidentity.py) */
 
 /* ------------------------------------------------------------------------ */
 /* Fixed conventions shared with the boot shim, the packer and the kernel   */
@@ -194,6 +194,13 @@ has_word(const char *line, const char *word)
  * the screen is left to the kernel (and to "oem screenshot").
  */
 static int screen_quiet;
+/*
+ * And while the kernel runs, whatever started the loader: under HakiOS's U-Boot (the menu of an installed HakiOS) there
+ * is no USB command loop, the text console is U-Boot's, drawn into the framebuffer the kernel shows Darwin in, and every
+ * line core 0 printed during a run (the storage's, the battery's, the watchdog's) ran over the system's screen.
+ * What it was before the run, to go back to.
+ */
+static int screen_quiet_before_run;
 
 static void
 put_char(char c)
@@ -321,7 +328,8 @@ find_log_partition(void)
  * last run. It is what gets written to the log partition and what the host
  * fetches over USB (fastboot get_staged).
  */
-static char out_buf[2 * 1024 * 1024];
+/* aligned for any firmware's block I/O: U-Boot's wants a buffer aligned to the block size (media->io_align) */
+static char out_buf[2 * 1024 * 1024] __attribute__((aligned(0x2000)));
 /* the storage's reads for the kernel land here (block_poll), and nothing else may be put in it */
 #define BLOCK_BUFFER_SIZE  (4u << 20)
 static uint8_t block_buffer[BLOCK_BUFFER_SIZE] __attribute__((aligned(0x2000)));
@@ -510,7 +518,7 @@ dt_prop_padded(struct dt_writer *w, const char *name, const char *value, uint32_
 
 /*
  * Properties copied from the iPhone's device tree (identity.h), but one: the iPhone X's display is a
- * wide-gamut one ("artwork-display-gamut" P3), and with it iOS takes the screen for one that shows
+ * wide-gamut one ("artwork-display-gamut" P3), and with it Darwin takes the screen for one that shows
  * extended colour (MobileGestalt's HasExtendedColorDisplay): WebKit then draws a page's tiles into
  * surfaces of ten bits a colour ('w30r', 'b3a8'), which neither the kernel's surfaces nor the window
  * server's renderer here do (eight bits, BGRA), and every page comes out black. Here the screen is
@@ -1597,7 +1605,7 @@ ufs_survey(void)
  * Reads, and -- with ufs_write=1 on the command line -- writes into one partition and nowhere
  * else: the port's own darwin, proved by its GPT entry (name, both GUIDs, first and last LBA, its
  * logical unit), and in it only past everything the build writes from the computer, so that no
- * answer to the kernel can reach Android's partitions, the iOS volume or the cryptexes. The
+ * answer to the kernel can reach Android's partitions, the Darwin volume or the cryptexes. The
  * refusals are here, in the kernel (drivers/storage/hakios.ufs.c) and in UEFI's own driver, which gives
  * out a partition's BlockIo and bounds it: a request has to pass all three.
  *
@@ -1615,18 +1623,31 @@ ufs_survey(void)
 #define BLOCK_PART_UNIT    1u                          /* the entry is a whole logical unit, not a partition */
 #define BLOCK_OP_READ      0u
 #define BLOCK_OP_WRITE     1u
+/*
+ * The data volume's writes (HFS Plus on /dev/ufs_darwin_data): written and nothing more -- no flush, no read back --
+ * because its journal asks for the flush itself (BLOCK_OP_FLUSH) where the order matters, and a flush and a read
+ * back after every 4 KB of metadata made Darwin crawl. Offered with BLOCK_CAN_FAST in write_caps; the same bounds as
+ * BLOCK_OP_WRITE. /dev/rufs_darwin's writes stay BLOCK_OP_WRITE, flushed and read back.
+ */
+#define BLOCK_OP_WRITE_FAST 2u
+#define BLOCK_OP_FLUSH     3u                          /* the write partition's cache to the flash; one block in bounds */
+#define BLOCK_CAN_FAST     1u
 
 /*
  * The one partition a write may reach, and from which of its blocks. darwin is the port's own
  * 20 GiB at the end of logical unit 0 (README, "The port's partition"); what the build puts there
- * from the computer (tools/darwin-write.py) is the iOS volume at its start and the two cryptexes
- * behind it, and nothing of this port reads or writes the rest -- so the data of iOS lives there
- * and a write is refused before that block. The identity is the whole of darwin-write.py's: the
- * same partition, named the same, of the same size, in the same place, on logical unit 0.
+ * from the computer (tools/darwin-write.py) is the Darwin volume at its start and the two cryptexes
+ * behind it, and nothing of this port reads or writes the rest -- so the data of Darwin lives there
+ * and a write is refused before that block. The identity: the partition named darwin, of the APFS
+ * container type, on logical unit 0, in blocks of 4096 and at least the 20 GiB the port lays out. Not
+ * its place, its exact size or its unique GUID: tools/userdata-carve.py makes darwin at the end of
+ * whatever userdata the phone has, with a GUID of its own (BLOCK_DARWIN_FIRST/LAST and _UNIQ were
+ * the first phone's, and no write was ever served on another); they are printed instead.
  */
 #define BLOCK_WRITE_FIRST  2042368ULL                  /* darwin's blocks of 4096: past both cryptexes */
 #define BLOCK_DARWIN_FIRST PLAT->darwin->first         /* its first and last LBA of unit 0, as the GPT has them */
 #define BLOCK_DARWIN_LAST  PLAT->darwin->last
+#define BLOCK_DARWIN_MIN   5242875ULL                  /* blocks of 4096: the first phone's darwin, the layout's */
 
 /*
  * The partitions first, then the logical units they are on (BLOCK_PART_UNIT, named unit0, unit1,
@@ -1660,7 +1681,7 @@ struct loader_block {
 	 * which is a read, and a loader that does not know them leaves these zero, which is no write.
 	 */
 	uint32_t write_part_plus_one;
-	uint32_t write_reserved;
+	uint32_t write_caps;                   /* BLOCK_CAN_FAST; zero from a loader before it, which a kernel reads as none */
 	uint64_t write_first;
 	/* written by the kernel: what it wants, then request is advanced */
 	struct {
@@ -1966,6 +1987,7 @@ block_tables(void)
 static int
 block_is_darwin(const efi_partition_info *info, const efi_block_io *bio, const struct loader_block_part *bp)
 {
+	const uint8_t *u = (const uint8_t *)&info->unique_guid;
 	static const char name[] = "darwin";
 	const char *why = NULL;
 
@@ -1986,8 +2008,9 @@ block_is_darwin(const efi_partition_info *info, const efi_block_io *bio, const s
 		/* the first unit UEFI lists: this firmware's device paths say no logical unit number
 		 * (device_path_print finds no 3.19 node), so bp->lun is 0xff for every unit */
 		why = "it is not on the first logical unit";
-	} else if (bp->block_size != 4096 || bp->blocks != BLOCK_DARWIN_LAST - BLOCK_DARWIN_FIRST + 1) {
-		why = "its blocks are not what they were";
+	} else if (bp->block_size != 4096 || bp->blocks < BLOCK_DARWIN_MIN ||
+	    info->end_lba - info->start_lba + 1 != bp->blocks) {
+		why = "it is not 20 GiB in blocks of 4096";
 	} else if (bio->media->read_only) {
 		why = "UEFI gives it out read only";
 	}
@@ -1995,8 +2018,9 @@ block_is_darwin(const efi_partition_info *info, const efi_block_io *bio, const s
 		print("ufs: darwin: no write will be served: %s\n", why);
 		return 0;
 	}
-	print("ufs: darwin (LBA %d..%d of unit 0): its blocks from %d on may be written this run\n",
-	    info->start_lba, info->end_lba, BLOCK_WRITE_FIRST);
+	print("ufs: darwin (LBA %d..%d of unit 0, unique GUID %x...%x): its blocks from %d on may be written this run\n",
+	    info->start_lba, info->end_lba, (uint64_t)u[3] << 24 | (uint64_t)u[2] << 16 | (uint64_t)u[1] << 8 | u[0],
+	    (uint64_t)u[12] << 24 | (uint64_t)u[13] << 16 | (uint64_t)u[14] << 8 | u[15], BLOCK_WRITE_FIRST);
 	return 1;
 }
 
@@ -2123,6 +2147,7 @@ block_start(void)
 	if (block_write_part >= 0) {
 		block_shared.write_part_plus_one = (uint32_t)block_write_part + 1;
 		block_shared.write_first = BLOCK_WRITE_FIRST;
+		block_shared.write_caps = BLOCK_CAN_FAST;
 	}
 	block_shared.magic = BLOCK_MAGIC;
 	block_shared.version = BLOCK_VERSION;
@@ -2248,7 +2273,7 @@ block_poll(void)
 			}
 			s = 0x800000000000000FULL;      /* EFI_ACCESS_DENIED */
 			bytes = 0;
-		} else if (op == BLOCK_OP_WRITE) {
+		} else if (op == BLOCK_OP_WRITE || op == BLOCK_OP_WRITE_FAST || op == BLOCK_OP_FLUSH) {
 			if (block_write_part < 0 || part != (uint32_t)block_write_part || lba < BLOCK_WRITE_FIRST) {
 				/* not darwin, or not past what the build writes from the computer: never */
 				if (block_writes_refused++ < 8) {
@@ -2257,6 +2282,17 @@ block_poll(void)
 				}
 				s = 0x800000000000000FULL;      /* EFI_ACCESS_DENIED */
 				bytes = 0;
+			} else if (op == BLOCK_OP_FLUSH) {
+				s = bio->flush_blocks(bio);
+				bytes = 0;
+			} else if (op == BLOCK_OP_WRITE_FAST) {
+				flush_dcache((uint64_t)(uintptr_t)block_buffer,
+				    (uint64_t)(uintptr_t)block_buffer + bytes);
+				s = bio->write_blocks(bio, bio->media->media_id, lba, bytes, block_buffer);
+				if (!EFI_ERROR(s)) {
+					block_writes++;
+					block_write_bytes += bytes;
+				}
 			} else {
 				/*
 				 * The kernel filled the buffer and cleaned its lines of it; drop whatever this
@@ -2651,6 +2687,8 @@ struct payload_info {
 	uint64_t checkpoint;
 	uint64_t forced_base;
 	uint64_t resident_rd;           /* size of a root image the host put at the resident address */
+	const uint8_t *resident;        /* ... or one the payload carries, which the loader puts there itself */
+	uint32_t resident_size;
 	const char *kernel_version;     /* kernel.ver: the version of the kernel in this payload (tools/kernel-version.py) */
 	int usb_mode;
 };
@@ -2721,6 +2759,9 @@ parse_payload(struct payload_info *pi, int verbose)
 			pi->cmdline = text;
 		} else if (str_eq(e->name, "physbase")) {
 			pi->forced_base = parse_number(text, 16); /* testing aid; must be free RAM */
+		} else if (str_eq(e->name, "resident")) {
+			pi->resident = p + sizeof(*e);            /* the image xl ramdisk would send: a boot with no host */
+			pi->resident_size = e->size;
 		} else if (str_eq(e->name, "rdres")) {
 			pi->resident_rd = parse_number(text, 16); /* e.g. loaded there by QEMU; see RESIDENT_RD_OFFSET */
 		} else if (str_eq(e->name, "kernel.ver")) {
@@ -3116,6 +3157,20 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 		}
 		resident_rd_size = pi.resident_rd;
 	}
+	/*
+	 * The payload's own resident image (a boot from the phone's boot partition, where no host sends one): put where
+	 * "oem ramdisk" puts it, once per run, and taken as if it had been sent.
+	 */
+	if (pi.resident != NULL) {
+		if (win_size <= RESIDENT_RD_OFFSET + RESIDENT_RD_RESERVE ||
+		    pi.resident_size > win_size - RESIDENT_RD_OFFSET - RESIDENT_RD_RESERVE) {
+			print("resident %x does not fit in the memory window\n", (uint64_t)pi.resident_size);
+			return 0;
+		}
+		memcpy((void *)(phys_base + RESIDENT_RD_OFFSET), pi.resident, pi.resident_size);
+		resident_rd_size = pi.resident_size;
+		print("resident image from the payload: %x bytes\n", (uint64_t)pi.resident_size);
+	}
 	if (resident_rd_size != 0) {
 		uint64_t res_pa = phys_base + RESIDENT_RD_OFFSET;
 		uint64_t res_size = (resident_rd_size + PAGE_SIZE_MAX - 1) & ~(PAGE_SIZE_MAX - 1);
@@ -3172,7 +3227,7 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	int more_cores = 0, battery_requested = 0, ufs_requested = 0;
 	/* "torch=N" (not 0) there too: the phone's flashlight is the kernel's (drivers/camera/hakios.torch.c) */
 	int torch_requested = 0;
-	/* "cam=5" there too: the phone's wide camera is iOS's (drivers/camera/hakios.camera.c) */
+	/* "cam=5" there too: the phone's wide camera is Darwin's (drivers/camera/hakios.camera.c) */
 	int camera_requested = 0;
 	/* (the loader stays for run after run: what the last run's arguments said must not hold for this one) */
 	gamut_p3 = 0;
@@ -3394,7 +3449,7 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 
 	dt_begin(&w, "device-tree");
 	/*
-	 * The identity is the iPhone's (model, compatible, target-type ...): iOS user space looks
+	 * The identity is the iPhone's (model, compatible, target-type ...): Darwin user space looks
 	 * its device up by these, and its files -- the dyld shared cache to begin with -- are
 	 * those of that phone. XNU itself does not care; the hardware is described further down.
 	 */
@@ -3506,9 +3561,9 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	dt_begin(&w, "product");
 	dt_identity(&w, identity_product, sizeof(identity_product) / sizeof(identity_product[0]), identity_product_data);
 	/*
-	 * and its haptics: "closed-loop" (MobileGestalt's DeviceSupportsClosedLoopHaptics) makes iOS play
+	 * and its haptics: "closed-loop" (MobileGestalt's DeviceSupportsClosedLoopHaptics) makes Darwin play
 	 * its vibrations and feedbacks as waveforms on the "Actuator" audio device (the audio plug-in
-	 * hands them to the kernel's motor driver); without it iOS looks for an IOKit vibration motor
+	 * hands them to the kernel's motor driver); without it Darwin looks for an IOKit vibration motor
 	 * that the iPhone X does not have, and nothing vibrates.
 	 */
 	dt_begin(&w, "haptics");
@@ -3651,6 +3706,8 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	}
 	print("jumping to %x\n", entry_va + slide);
 	flush_log();
+	screen_quiet_before_run = screen_quiet;
+	screen_quiet = 1;               /* the screen is the kernel's now; the log still takes every line */
 	/* From here on the kernel feeds the watchdog (boot-arg hv_wdt_pet, see loader_return.c in XNU). */
 	wdt_set_ms(60000);
 
@@ -3685,6 +3742,7 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 		if (kernel_mpidr != this_mpidr) {
 			int64_t status = run_on_other_cpu(kernel_mpidr, entry_va + slide, ba_pa, kernel_live, slide, kernel_budget);
 
+			screen_quiet = screen_quiet_before_run;
 			wdt_set_ms(WDT_BITE_MS);
 			if (status != 0) {
 				/* a kernel that hung may have left its own transfer list in the controller */
@@ -3714,6 +3772,7 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	}
 
 	/* --- the kernel came back ------------------------------------------- */
+	screen_quiet = screen_quiet_before_run;
 	wdt_set_ms(WDT_BITE_MS);
 	hc_take_back("the kernel came back");   /* before anything here touches the storage */
 	if (hc_known) {
@@ -3905,6 +3964,13 @@ out:
  * Returns the byte count, or -1 if the transfer was cancelled or the cable
  * state changed. Keeps the watchdog fed while idle.
  */
+/*
+ * Seconds a download may go without a byte before it is given up (0: wait for ever). A host that is stopped half-way
+ * through a download (a fastboot killed by its timeout) left the loader waiting for the rest for good: every command
+ * after it was taken for data, and only the power button brought the phone back.
+ */
+static uint64_t usb_data_timeout;
+
 static int64_t
 usb_wait(uint8_t endpoint)
 {
@@ -3924,6 +3990,10 @@ usb_wait(uint8_t endpoint)
 		}
 		/* with a kernel running, a host that went away must not keep this core from watching it */
 		if (run_active && READ_SYSREG(CNTVCT_EL0) - began > 3 * freq) {
+			return -1;
+		}
+		if (usb_data_timeout != 0 && READ_SYSREG(CNTVCT_EL0) - began > usb_data_timeout * freq) {
+			USB->abort_xfer(endpoint);
 			return -1;
 		}
 		if (msg == UsbDeviceEventTransferNotification && data.transfer.endpoint_index == endpoint) {
@@ -4086,6 +4156,7 @@ fb_command(char *cmd)
 			uint32_t magic_held = 0;
 			int magic_taken = 0;
 			fb_reply_data(total);
+			usb_data_timeout = 20;
 			while (got < total) {
 				uint64_t want = total - got > USB_CHUNK ? USB_CHUNK : total - got;
 				int64_t r = usb_rx(usb_rx_buf, want);
@@ -4104,6 +4175,7 @@ fb_command(char *cmd)
 				}
 				got += (uint64_t)r;
 			}
+			usb_data_timeout = 0;
 			if (got == total) {
 				if (magic_taken) {
 					*(volatile uint32_t *)dest = magic_held;
@@ -4269,7 +4341,7 @@ usb_command_loop(void)
  * QEMU's "ramfb" display shows whatever guest memory it is told to, in any size; the firmware
  * only offers a few small landscape modes of it. So we point it at memory of our own with the
  * shape of the iPhone's screen, through the fw_cfg file "etc/ramfb" (the firmware's own mode
- * is simply replaced). In QEMU the display is then exactly what iOS expects; on the real phone
+ * is simply replaced). In QEMU the display is then exactly what Darwin expects; on the real phone
  * the kernel's display driver scales that picture to the panel.
  */
 #define PHONE_WIDTH     1125            /* the screen of the iPhone X, whose identity we carry */
@@ -4321,7 +4393,7 @@ ramfb_phone_screen(void)
 	/*
 	 * volatile: QEMU writes `control' back (to 0) when it has done the request, behind the compiler's back. Without the
 	 * qualifier a build is free to keep the value written a few lines below and never look again, and the loader then
-	 * says the request failed, leaves ramfb at the firmware's 800x600 and iOS draws its 1125x2436 into a corner: a black window
+	 * says the request failed, leaves ramfb at the firmware's 800x600 and Darwin draws its 1125x2436 into a corner: a black window
 	 * (it did, with a newer build of this very file; the older one happened to reload).
 	 */
 	static volatile struct {
@@ -4388,7 +4460,7 @@ ramfb_phone_screen(void)
  * happened, and efi_main says it under the banner. The file has to fit in the payload region (less the last MiB,
  * which holds the panic log), and the region has to be free: where a firmware keeps it reserved, the allocation is
  * refused and the loader goes on without a payload, as it always did.
- * Only the kernel and a root image that fits in the payload come this way; the big iOS system image does not
+ * Only the kernel and a root image that fits in the payload come this way; the big Darwin system image does not
  * (docs/uefi-boot.md says what does).
  */
 static uint64_t volume_payload_bytes;           /* 0: nothing was read; else the payload's size */
