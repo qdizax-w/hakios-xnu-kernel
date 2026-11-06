@@ -61,6 +61,7 @@ changes to it; the scripts named fetch the release and put the changes on.
 - metal: `metal_fps=mainpass` prints the draws of a heavy pass, `metal_fps=passes` each pass's attachments
 - display: surfaces let go of when their pixels are on the panel, not when the next frame comes: no change in frame rate
 - metal: luma_boost is left out when QuartzCore's library has its own (a later system's, off a Mac): it was 83% of the GPU's timed passes; `metal_luma_boost=1` draws it
+- metal: the window server gets a pipeline whose draws are skipped when its fragment cannot be served, instead of aborting (a Mac's QuartzCore has no luma_boost)
 - metal: `metal_defer=1` records the window server's command buffers on a thread of hakios-metal's own -- a draw costs its render thread ~5 us instead of ~40
 - metal: `metal_fps=passes` prints every pass of a slow frame; the full-screen pass of the home screen is 6 to 13 ms of the GPU's ~10 a frame
 - display: `fbsubtype=N` with `fbwidth`, `fbheight` and `fbscale` reports another iPhone's screen class (the XR's 828 x 1792 at 2: no red rdar status bar)

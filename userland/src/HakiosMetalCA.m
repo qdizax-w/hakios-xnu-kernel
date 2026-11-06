@@ -1198,6 +1198,7 @@ HM_REFUSES_OUT_LOUD
  * attachment (hakios_metal_program), under Metal's own base class. The ivar names are prefixed so that none shadows the
  * base's _device and _label, which its designated initialiser fills from the descriptor. */
 @interface HakiosMetalRenderPipelineState : _MTLRenderPipelineState {
+	BOOL _hakiosLeftOut;   /* its fragment could not be served: hm_left_out_program(), no draw of it reaches the GPU */
 	HakiosMetalDevice *_hakiosDevice;
 	hakios_metal_program *_program;
 	uint64_t _hakiosUniqueIdentifier;   /* the base's uniqueIdentifier is a nil-stub; see the sampler */
@@ -1213,6 +1214,8 @@ HM_REFUSES_OUT_LOUD
 - (instancetype)initWithHakiosDevice:(HakiosMetalDevice *)device program:(hakios_metal_program *)program
 			  descriptor:(MTLRenderPipelineDescriptor *)descriptor;
 - (hakios_metal_program *)hakiosProgram;
+- (BOOL)hakiosLeftOut;
+- (void)hakiosSetLeftOut;
 - (void)hakiosKeepFragment:(NSData *)air constants:(const hakios_metal_constant *)constants count:(unsigned)count;
 - (hakios_metal_program *)hakiosProgramFor:(hakios_metal_buffer *const *)buffers offsets:(const uint64_t *)offsets count:(unsigned)count;
 @end
@@ -1599,6 +1602,49 @@ hm_ca_nearest(NSString *frag)
 		}
 	}
 	return best;
+}
+
+/*
+ * A pipeline for the window server when its fragment function cannot be served, whose draws are left out (hakiosLeftOut).
+ * CoreAnimation aborts on a pipeline it cannot have, and a later QuartzCore's library (a Mac's, which has no luma_boost
+ * and whose inplace_copy stores through an image, refused in a draw) can leave it there: a missing effect is a picture
+ * as it is, an abort is no picture at all and backboardd restarting for ever. The fragment is the first of the
+ * library's plain ones that links with this vertex stage; it never runs.
+ */
+static hakios_metal_program *
+hm_left_out_program(NSData *vsAir, const hakios_metal_constant *vsConstants, unsigned vsCount, unsigned format, id<MTLDevice> device)
+{
+	static NSArray *plain;
+	static dispatch_once_t once;
+
+	if (strcmp(getprogname(), "backboardd") != 0) {
+		return NULL;
+	}
+	dispatch_once(&once, ^{
+		NSMutableArray *found = [NSMutableArray array];
+		id lib = [device newLibraryWithURL:[NSURL fileURLWithPath:@"/redwood/share/ca-share/QuartzCore-default.metallib"] error:NULL];
+
+		for (NSString *name in @[ @"attachment_clear_frag_lph", @"path_clear_frag_lph", @"home_affordance_base_lph" ]) {
+			id f = [lib newFunctionWithName:name];
+
+			if (f != nil && [f respondsToSelector:sel_getUid("bitcodeData")]) {
+				NSData *air = ((NSData *(*)(id, SEL))objc_msgSend)(f, sel_getUid("bitcodeData"));
+
+				if (air != nil) [found addObject:air];
+			}
+			[f release];
+		}
+		[lib release];
+		plain = [found copy];
+	});
+	for (NSData *air in plain) {
+		hakios_metal_program *program = hakios_metal_program_new_bitcode_constants([vsAir bytes], [vsAir length], vsConstants, vsCount, [air bytes],
+											   [air length], NULL, 0, format);
+		if (program != NULL) {
+			return program;
+		}
+	}
+	return NULL;
 }
 
 /* The module to compile for FUNCTION (of the pipeline labelled PIPELINE, vertex stage or not): its variant when
@@ -3173,6 +3219,7 @@ hm_describe_function(id f)
 	NSData *vsAir, *fsAir;
 	hakios_metal_program *program;
 	unsigned format;
+	BOOL leftOut = NO;
 
 	hm_describe_function([descriptor fragmentFunction]);
 	if (why != nil) {
@@ -3201,6 +3248,17 @@ hm_describe_function(id f)
 		program = hakios_metal_program_new_bitcode_constants([vsAir bytes], [vsAir length], vsConstants, vsCount, fsAir != nil ? [fsAir bytes] : NULL,
 								     fsAir != nil ? [fsAir length] : 0,
 								     fsConstants, fsCount, format);
+		if (program == NULL && fs != nil) {
+			NSString *refused = [NSString stringWithUTF8String:hakios_metal_error()];
+
+			program = hm_left_out_program(vsAir, vsConstants, vsCount, format, self);
+			if (program != NULL) {
+				hm_print("left out: %s + %s for pixel format %u, its draws skipped: %s\n", [[vs name] UTF8String], [[fs name] UTF8String], format,
+					 [refused UTF8String]);
+				leftOut = YES;
+				fsAir = nil;
+			}
+		}
 		if (program != NULL) {
 			hm_dump_function("vs", vs, "metal_dump=fn", vsConstants, vsCount);
 			if (fs != nil) hm_dump_function("fs", fs, "metal_dump=fn", fsConstants, fsCount);
@@ -3302,6 +3360,7 @@ hm_describe_function(id f)
 		unsigned count = fs != nil ? hm_function_constants(fs, fc, 64) : 0;
 
 		if (state != nil && fsAir != nil) [state hakiosKeepFragment:fsAir constants:fc count:count];
+		if (leftOut) [state hakiosSetLeftOut];
 		return state;
 	}
 }
@@ -7387,6 +7446,8 @@ HM_REFUSES_OUT_LOUD
 }
 
 - (hakios_metal_program *)hakiosProgram { return _program; }
+- (BOOL)hakiosLeftOut { return _hakiosLeftOut; }
+- (void)hakiosSetLeftOut { _hakiosLeftOut = YES; }
 
 /* boot-arg metal_nospec: every draw with the pipeline's own program, no uber shader specialised */
 static BOOL
@@ -8341,7 +8402,7 @@ hm_trace_draw(const void *which, const char *program, const struct hakios_metal_
 	if (hm_trace_draw([_pipeline hakiosProgram], hakios_metal_program_name([_pipeline hakiosProgram]), &_pass, fsTex, _fsHighestTexture, (unsigned)primitive, 0)) {
 		return;
 	}
-	if (hm_luma_boost_left_out(hakios_metal_program_name([_pipeline hakiosProgram]))) {
+	if ([_pipeline hakiosLeftOut] || hm_luma_boost_left_out(hakios_metal_program_name([_pipeline hakiosProgram]))) {
 		return;
 	}
 	if (indexBuffer != nil && ![indexBuffer isKindOfClass:[HakiosMetalBuffer class]]) {
