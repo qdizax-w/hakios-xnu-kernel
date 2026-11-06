@@ -6,7 +6,7 @@ name: miatoll
 on:
   workflow_dispatch:
   push:
-    branches: [hakios]
+    branches: [hakios, metal-618]
     paths: ['xnu/**', 'xnu-deps/**', 'wifi/**', 'xnuloader/**', 'drivers/**', 'configs/**', 'devices/manifest.conf', 'tools/**', 'userland/**', 'mkxnuimg.py', '.github/workflows/miatoll.yml']
 
 jobs:
@@ -54,9 +54,13 @@ jobs:
           mkdir -p sysimage/rootfs/usr/lib
           python3 tools/hakios-device.py sync
           source devices/miatoll/boot.conf
-          (cd userland && env FLASHBOOT=1 $USERLAND_VARS ./build.sh) > userland-build.log 2>&1 || true
+          # Metal on the Adreno 618: Mesa first (its archives go into hakios-metal), then the engine for this chip, then
+          # the plug-in. METAL_PLUGIN=ca only adds the plug-in: without boot-arg metal=1 the system stays on OpenGL ES.
+          DRIVERS="softpipe,freedreno" tools/mk-mesa.sh > mesa-build.log 2>&1 || { tail -60 mesa-build.log; exit 1; }
+          (cd hakios-metal && make ios MESA=1 A618=1 -j"$(nproc)") > hakios-metal-build.log 2>&1 || { tail -60 hakios-metal-build.log; exit 1; }
+          (cd userland && env FLASHBOOT=1 METAL_PLUGIN=ca $USERLAND_VARS ./build.sh) > userland-build.log 2>&1 || true
           ls -la userland/obj
-          for f in init stage0 var_store libhakios.dylib libhakios.sb.dylib libhakios.gl.dylib libOSMesa.8.dylib; do
+          for f in init stage0 var_store libhakios.dylib libhakios.sb.dylib libhakios.gl.dylib libOSMesa.8.dylib HakiosMetal; do
             [ -f userland/obj/$f ] || { echo "missing userland/obj/$f"; tail -80 userland-build.log; exit 1; }
           done
           mkdir -p out/userland && cp -r userland/obj/* out/userland/ && rm -f out/userland/*.o out/userland/*.h
@@ -73,7 +77,10 @@ jobs:
         if: always()
         with:
           name: userland-build-log
-          path: userland-build.log
+          path: |
+            userland-build.log
+            mesa-build.log
+            hakios-metal-build.log
           if-no-files-found: ignore
       - uses: actions/upload-artifact@v5
         if: always()
