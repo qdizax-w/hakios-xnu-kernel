@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
   push:
     branches: [hakios, metal-618]
-    paths: ['xnu/**', 'xnu-deps/**', 'wifi/**', 'xnuloader/**', 'drivers/**', 'configs/**', 'devices/manifest.conf', 'tools/**', 'userland/**', 'mkxnuimg.py', '.github/workflows/miatoll.yml']
+    paths: ['.github/**', 'hakios-metal/**', 'userland/**', 'xnu/**', 'xnu-deps/**', 'wifi/**', 'xnuloader/**', 'drivers/**', 'configs/**', 'devices/manifest.conf', 'tools/**', 'userland/**', 'mkxnuimg.py', '.github/workflows/miatoll.yml']
 
 jobs:
   kernel:

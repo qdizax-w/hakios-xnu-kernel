@@ -305,8 +305,15 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 				M2V_OBJS="../xnu-deps/build/m2v/out/frontend.o ../xnu-deps/build/m2v/out/libadreno_metal_bridge.a -framework CoreFoundation -lc++ -Wl,-dead_strip"
 				echo "build.sh: with UniXNU's Metal on Vulkan (metal_m2v=1)"
 			fi
+			# without it the plug-in's weak references stay undefined and test NULL at run time: the linker is told so
+			M2V_ABSENT=
+			if [ -z "$M2V_OBJS" ]; then
+				for s in open first_problem status formats variant_hook; do
+					M2V_ABSENT="$M2V_ABSENT -Wl,-U,_native_bridge_metal_$s"
+				done
+			fi
 			$DYN -bundle -framework Foundation -framework IOKit -framework IOSurface -framework Metal -lobjc \
-				-I$HM/include -o obj/HakiosMetal src/HakiosMetalCA.m $METAL_GPU $M2V_OBJS
+				-I$HM/include -o obj/HakiosMetal src/HakiosMetalCA.m $METAL_GPU $M2V_OBJS $M2V_ABSENT
 		else
 		$DYN -bundle -framework Foundation -framework Metal -lobjc -I$METAL_SRC -o obj/HakiosMetal $METAL_SRC/HakiosMetal.m \
 			$METAL_SRC/hakios_metallib.c $METAL_GPU
