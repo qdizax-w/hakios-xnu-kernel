@@ -57,6 +57,7 @@ jobs:
           # Metal on the Adreno 618: Mesa first (its archives go into hakios-metal), then the engine for this chip, then
           # the plug-in. METAL_PLUGIN=ca only adds the plug-in: without boot-arg metal=1 the system stays on OpenGL ES.
           DRIVERS="softpipe,freedreno" tools/mk-mesa.sh > mesa-build.log 2>&1 || { tail -60 mesa-build.log; exit 1; }
+          ninja -C xnu-deps/build/mesa/build-softpipe-freedreno src/compiler/air/libair.a >> mesa-build.log 2>&1 || { tail -60 mesa-build.log; exit 1; }
           (cd hakios-metal && make ios MESA=1 A618=1 -j"$(nproc)") > hakios-metal-build.log 2>&1 || { tail -60 hakios-metal-build.log; exit 1; }
           (cd userland && env FLASHBOOT=1 METAL_PLUGIN=ca $USERLAND_VARS ./build.sh) > userland-build.log 2>&1 || true
           ls -la userland/obj
