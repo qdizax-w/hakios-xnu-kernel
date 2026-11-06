@@ -55,7 +55,7 @@ std::mutex gCompilerLock;   // ir3 keeps state in the compiler object; one compi
 ir3_compiler* theCompiler() {
     static ir3_compiler* compiler = [] {
         fd_dev_id id{};
-        id.gpu_id = 0;
+        id.gpu_id = a6xx::kGpuId;
         id.chip_id = a6xx::kChipId;
         // A framebuffer fetch (nir_texop_txf_ms_fb) through the FS's own texture table, at the slot after its last
         // texture, as turnip has it (tu_device.cc: -1): the zero default would make it a bindless read of descriptor
@@ -1070,7 +1070,7 @@ bool hasCompiler() { return theCompiler() != nullptr; }
 std::unique_ptr<CompiledKernel> compileAir(const void* bitcode, size_t size, std::string* why, const FunctionConstants& constants) {
     std::lock_guard<std::mutex> g(gCompilerLock);
     if (theCompiler() == nullptr) {
-        refuse(why, "ir3 has no compiler for chip 0x06030500");
+        refuse(why, "ir3 has no compiler for this chip");
         return nullptr;
     }
     Translation t;
@@ -1279,7 +1279,7 @@ std::unique_ptr<CompiledStage> compileStage(const void* bitcode, size_t size, st
                                            const KnownBuffer* known) {
     std::lock_guard<std::mutex> g(gCompilerLock);
     if (theCompiler() == nullptr) {
-        refuse(why, "ir3 has no compiler for chip 0x06030500");
+        refuse(why, "ir3 has no compiler for this chip");
         return nullptr;
     }
     const std::string name = stageCacheName(bitcode, size, constants, iboBase, known);
