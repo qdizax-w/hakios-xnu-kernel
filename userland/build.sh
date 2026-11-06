@@ -820,6 +820,8 @@ if [ -f $DARWIN/system.manifest ] && [ -f $CACHE/dyld_shared_cache_arm64 ] &&
 		# -f: a cryptex fetched with the cache already in it would otherwise stop the build
 		ln -f "$f" $D/
 	done
+	# the wallpapers at 2x, as flashboot.apfs has them: here the image holds them itself
+	[ ! -d sysroot/Library/Wallpaper/Collections ] || python3 mkwallpapertwins.py --in-place sysroot/Library/Wallpaper/Collections
 	# SLIM=<file>: paths (one per line, as in the image, # for comments) left out of the system image, for a
 	# phone with less RAM (slim.miatoll); out of the tree and out of a copy of the manifest, which would
 	# otherwise make an empty directory of each
