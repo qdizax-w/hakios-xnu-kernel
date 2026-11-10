@@ -2,7 +2,7 @@
 
 Made by `tools/boot-args.py --markdown`; CI fails if it is out of date with the source (`tools/boot-args.py --check`).
 
-Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **324 arguments**: 275 read by the kernel, 14 by the loader, 45 by user space (one is read in more than one place).
+Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **337 arguments**: 287 read by the kernel, 14 by the loader, 47 by user space (one is read in more than one place).
 
 This is a catalogue of what exists and who reads it, not a manual. What an argument means is in the head of the file that reads it. The stable switches have a symbol in the configuration (`tools/hakios-config.py help SYMBOL`, `docs/configs.md`); the rest are the knobs of bring-up (a driver's steps, pauses, traces, test modes) and can change with the driver. Any of them can be given in a configuration with `CONFIG_BOOTARGS="name=value ..."`, which checks that each name is in this list.
 
@@ -32,7 +32,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `fb_queue` | K | `MiniIOMobileFramebuffer.cpp` | `CONFIG_FB_QUEUE` |  |
 | `fb_threads` | K | `MiniIOMobileFramebuffer.cpp` | `CONFIG_FB_THREADS` |  |
 | `fbheight` | K | `MiniIOMobileFramebuffer.cpp` | `CONFIG_FBHEIGHT` |  |
-| `fbscale` | K | `MiniIOMobileFramebuffer.cpp` | `CONFIG_FBSCALE` |  |
+| `fbscale` | KU | `MiniIOMobileFramebuffer.cpp`, `inject_sb.c` | `CONFIG_FBSCALE` |  |
 | `fbscale_artwork` | K | `MiniIOMobileFramebuffer.cpp` | `CONFIG_FBSCALE_ARTWORK` |  |
 | `fbtrace` | K | `MiniIOMobileFramebuffer.cpp` | `CONFIG_FBTRACE` |  |
 | `fbwidth` | K | `MiniIOMobileFramebuffer.cpp` | `CONFIG_FBWIDTH` |  |
@@ -88,11 +88,12 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 |---|---|---|---|---|
 | `privs` | K | `kern_minimac.c` | `CONFIG_PRIVS` |  |
 
-## Wi-Fi (31)
+## Wi-Fi (32)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
-| `wifi` | K | `hakios.wifi.c` | `CONFIG_WIFI` |  |
+| `modem` | K | `hakios.mpss.c`, `hakios.wifi.c` | `CONFIG_MODEM` |  |
+| `wifi` | K | `hakios.usbnet.c`, `hakios.wifi.c` | `CONFIG_WIFI` |  |
 | `wifi_again` | K | `hakios.wifi.c` | `CONFIG_WIFI_AGAIN` |  |
 | `wifi_ask` | K | `hakios.wifi.c` | `CONFIG_WIFI_ASK` |  |
 | `wifi_ba` | K | `lx_80211.c` | `CONFIG_WIFI_BA` | implied by wifi=1 |
@@ -124,11 +125,11 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `wifi_watch` | K | `hakios.wifi.c` | `CONFIG_WIFI_WATCH` |  |
 | `wifi_wide` | K | `lx_80211.c` | `CONFIG_WIFI_WIDE` | implied by wifi=1 |
 
-## Cellular (53)
+## Cellular (57)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
-| `modem` | K | `hakios.mpss.c` | `CONFIG_MODEM` |  |
+| `modem_after` | K | `hakios.mpss.c` | `CONFIG_MODEM_AFTER` |  |
 | `modem_again` | K | `hakios.mpss.c` | `CONFIG_MODEM_AGAIN` |  |
 | `modem_apn` | K | `hakios.mpss.c` | `CONFIG_MODEM_APN` |  |
 | `modem_buffer` | K | `hakios.mpss.c` | `CONFIG_MODEM_BUFFER` |  |
@@ -159,6 +160,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `modem_no_tftp` | K | `hakios.mpss.c` | `CONFIG_MODEM_NO_TFTP` |  |
 | `modem_online` | K | `hakios.mpss.c` | `CONFIG_MODEM_ONLINE` |  |
 | `modem_pause` | K | `hakios.mpss.c` | `CONFIG_MODEM_PAUSE` |  |
+| `modem_rails` | K | `hakios.mpss.c` | `CONFIG_MODEM_RAILS` |  |
 | `modem_return` | K | `hakios.mpss.c` | `CONFIG_MODEM_RETURN` |  |
 | `modem_rmtfs_delay` | K | `hakios.mpss.c` | `CONFIG_MODEM_RMTFS_DELAY` |  |
 | `modem_rmtfs_rw_fake` | K | `hakios.mpss.c` | `CONFIG_MODEM_RMTFS_RW_FAKE` |  |
@@ -178,21 +180,26 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `soc_ipa_stream` | K | `hakios.mpss.c` | `CONFIG_SOC_IPA_STREAM` |  |
 | `soc_ipa_stream_uc` | K | `hakios.mpss.c` | `CONFIG_SOC_IPA_STREAM_UC` |  |
 | `soc_mpss_mem` | K | `hakios.mpss.c` | `CONFIG_SOC_MPSS_MEM` |  |
+| `soc_mpss_size` | K | `hakios.mpss.c` | `CONFIG_SOC_MPSS_SIZE` |  |
 | `soc_pas_ipa` | K | `hakios.mpss.c` | `CONFIG_SOC_PAS_IPA` |  |
 | `soc_pas_mpss` | K | `hakios.mpss.c` | `CONFIG_SOC_PAS_MPSS` |  |
 | `soc_smem` | K | `hakios.mpss.c`, `hakios.socinfo.c` | `CONFIG_SOC_SMEM` |  |
+| `wlfw` | K | `hakios.mpss.c` | `CONFIG_WLFW` |  |
+| `wlfw_mission` | K | `hakios.mpss.c` | `CONFIG_WLFW_MISSION` |  |
 
-## Audio and battery (33)
+## Audio and battery (35)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
 | `adsp` | K | `hakios.adsp.c` | `CONFIG_ADSP` |  |
+| `adsp_after` | K | `hakios.adsp.c` | `CONFIG_ADSP_AFTER` |  |
 | `adsp_again` | K | `hakios.adsp.c` | `CONFIG_ADSP_AGAIN` |  |
 | `adsp_apr_wait` | K | `hakios.adsp.c` | `CONFIG_ADSP_APR_WAIT` |  |
 | `adsp_keep` | K | `hakios.adsp.c` | `CONFIG_ADSP_KEEP` |  |
 | `adsp_listen` | K | `hakios.adsp.c` | `CONFIG_ADSP_LISTEN` |  |
 | `adsp_new` | K | `hakios.adsp.c` | `CONFIG_ADSP_NEW` |  |
 | `adsp_pause` | K | `hakios.adsp.c` | `CONFIG_ADSP_PAUSE` |  |
+| `adsp_rails` | K | `hakios.adsp.c` | `CONFIG_ADSP_RAILS` |  |
 | `adsp_return` | K | `hakios.adsp.c` | `CONFIG_ADSP_RETURN` |  |
 | `adsp_step` | K | `hakios.adsp.c` | `CONFIG_ADSP_STEP` |  |
 | `adsp_wait` | K | `hakios.adsp.c` | `CONFIG_ADSP_WAIT` |  |
@@ -238,13 +245,14 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `cam_shutter` | K | `hakios.camera.c` | `CONFIG_CAM_SHUTTER` |  |
 | `cam_vblank` | K | `hakios.camera.c` | `CONFIG_CAM_VBLANK` |  |
 
-## Touch and buttons (9)
+## Touch and buttons (10)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
 | `buttons` | K | `hakios.buttons.c` | `CONFIG_BUTTONS` |  |
 | `buttons_steps` | K | `hakios.buttons.c` | `CONFIG_BUTTONS_STEPS` |  |
 | `ft8756` | K | `hakios.buttons.c` | `CONFIG_FT8756` |  |
+| `nt36675` | K | `hakios.buttons.c` | `CONFIG_NT36675` |  |
 | `touch_flip` | K | `hakios.goodix.c` | `CONFIG_TOUCH_FLIP` |  |
 | `touch_poll_us` | K | `hakios.goodix.c` | `CONFIG_TOUCH_POLL_US` |  |
 | `touch_rate` | K | `hakios.goodix.c` | `CONFIG_TOUCH_RATE` |  |
@@ -390,7 +398,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `ufs` | L | `loader.c` | `CONFIG_UFS` |  |
 | `ufs_probe` | L | `loader.c` | `CONFIG_UFS_PROBE` |  |
 
-## User space (17)
+## User space (22)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
@@ -400,14 +408,19 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `ca_vbl` | U | `inject.c` | `CONFIG_CA_VBL` |  |
 | `caenv` | U | `inject.c` | `CONFIG_CAENV` |  |
 | `cc_fade` | U | `inject_sb.c` | `CONFIG_CC_FADE` |  |
+| `fb_flip` | K | `hakios.display.c` | `CONFIG_FB_FLIP` |  |
 | `fb_scan` | K | `hakios.display.c` | `CONFIG_FB_SCAN` |  |
 | `gl` | U | `inject.c`, `inject_sb.c` | `CONFIG_GL` |  |
 | `glcompile` | U | `inject.c` | `CONFIG_GLCOMPILE` |  |
 | `glno` | U | `inject.c` | `CONFIG_GLNO` |  |
 | `glsb3` | U | `inject.c` | `CONFIG_GLSB3` |  |
 | `glyes` | U | `inject.c` | `CONFIG_GLYES` |  |
+| `lite_ui` | U | `inject_sb.c` | `CONFIG_LITE_UI` |  |
+| `marks` | K | `hakios.platform.c` | `CONFIG_MARKS` |  |
 | `root_apfs` | U | `init.c` | `CONFIG_ROOT_APFS` |  |
 | `sb_delay` | U | `inject_sb.c` |  | xl (XL_SB_DELAY) |
 | `switcher_wallpaper` | U | `inject_sb.c` | `CONFIG_SWITCHER_WALLPAPER` |  |
 | `usbnet` | K | `hakios.usbnet.c` | `CONFIG_USBNET` |  |
+| `usbnet_addr` | K | `hakios.usbnet.c` | `CONFIG_USBNET_ADDR` |  |
+| `usbnet_unit` | K | `hakios.usbnet.c` | `CONFIG_USBNET_UNIT` |  |
 | `var_store` | U | `init.c` | `CONFIG_VAR_STORE` |  |

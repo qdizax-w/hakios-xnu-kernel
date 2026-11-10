@@ -440,6 +440,12 @@ if [ -f ../fw-touch/ft8756.bin ]; then
 	mkdir -p root/fw
 	install -m 0644 ../fw-touch/ft8756.bin root/fw/
 fi
+# ... and that of miatoll's other panel, the Tianma's (its Novatek NT36675 keeps none either: nt36675=1), Xiaomi's
+# /vendor/firmware/novatek_ts_tianma_fw.bin, pulled off the phone by ../devices/miatoll/pull-firmware.sh into ../fw-touch
+if [ -f ../fw-touch/nt36675.bin ]; then
+	mkdir -p root/fw
+	install -m 0644 ../fw-touch/nt36675.bin root/fw/
+fi
 # ... and the cameras' register tables (drivers/camera/hakios.camera.c, cam=2 and up), made by tools/camsensor.py out of
 # the sensors' module files of Android's camera stack, the phone's /vendor/lib64/camera/com.qti.sensormodule.
 # hakios_<maker>_<sensor>_<camera>.bin, in ../fw-camera (the vendor's: neither they nor the tables are in the

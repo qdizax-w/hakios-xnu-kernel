@@ -573,7 +573,8 @@ hakios_buttons_init(void)
 		uint32_t touch_screen = 0;
 
 		enabled = (PE_parse_boot_argn("touchscreen", &touch_screen, sizeof(touch_screen)) ||
-		    PE_parse_boot_argn("ft8756", &touch_screen, sizeof(touch_screen))) && touch_screen != 0;
+		    PE_parse_boot_argn("ft8756", &touch_screen, sizeof(touch_screen)) ||
+		    PE_parse_boot_argn("nt36675", &touch_screen, sizeof(touch_screen))) && touch_screen != 0;
 	}
 	if (!enabled) {
 		return;
