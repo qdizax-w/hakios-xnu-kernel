@@ -581,31 +581,7 @@ if [ -n "$FLASHBOOT" ] && [ -f $CACHE/dyld_shared_cache_arm64 ]; then
 	# one's files; init puts each collection's twins over its Wallpapers as a union (src/init.c, flash_root)
 	if [ -d $IOS/rootfs/Library/Wallpaper/Collections ]; then
 		rm -rf flashboot/wallpaper
-		python3 - $IOS/rootfs/Library/Wallpaper/Collections flashboot/wallpaper <<'EOF'
-import os, plistlib, sys
-src, dst = sys.argv[1:3]
-n = 0
-for col in sorted(os.listdir(src)):
-    walls = os.path.join(src, col, 'Wallpapers')
-    if not os.path.isdir(walls):
-        continue
-    for w in sorted(os.listdir(walls)):
-        if '@3x~' not in w or not os.path.isfile(os.path.join(walls, w, 'Wallpaper.plist')):
-            continue
-        twin = os.path.join(dst, col, w.replace('@3x~', '@2x~'))
-        os.makedirs(twin)
-        on_phone = '/Library/Wallpaper/Collections/%s/Wallpapers/%s/' % (col, w)
-        for f in os.listdir(os.path.join(walls, w)):
-            if f != 'Wallpaper.plist':
-                os.symlink(on_phone + f, os.path.join(twin, f))
-        with open(os.path.join(walls, w, 'Wallpaper.plist'), 'rb') as f:
-            p = plistlib.load(f)
-        p['logicalScreenClass'] = p.get('logicalScreenClass', '').replace('@3x~', '@2x~')
-        with open(os.path.join(twin, 'Wallpaper.plist'), 'wb') as f:
-            plistlib.dump(p, f)
-        n += 1
-print('  wallpapers at 2x: %d twins of the 3x ones' % n)
-EOF
+		python3 mkwallpaper2x.py $IOS/rootfs/Library/Wallpaper/Collections flashboot/wallpaper
 	fi
 	python3 ../tools/apfs/mkapfs.py -z --plain fw -o flashboot.boot.apfs Boot=flashboot | tail -1
 	[ -z "$CHECK" ] || ../tools/apfs/check-image.sh flashboot.boot.apfs Boot=flashboot
@@ -653,6 +629,11 @@ if [ -f $IOS/system.manifest ] && [ -f $CACHE/dyld_shared_cache_arm64 ] &&
 		mv sysroot/private/var/staged_system_apps/* sysroot/Applications/
 		rm -rf sysroot/private/var
 	fi
+	# the wallpapers at 2x here too (mkwallpaper2x.py): a boot from RAM has no flashboot/wallpaper laid over the
+	# collections, and without a twin for fbscale=2's screen class PosterBoard draws black
+	if [ -d sysroot/Library/Wallpaper/Collections ]; then
+		python3 mkwallpaper2x.py --in-collections $IOS/rootfs/Library/Wallpaper/Collections sysroot/Library/Wallpaper/Collections
+	fi
 	mv sysroot/sbin/launchd sysroot/sbin/launchd.ios
 	cp obj/stage0 sysroot/sbin/launchd
 	# the audio DSP's firmware, the phone's own from ../fw-audio (never in the repository), where the kernel reads
@@ -666,14 +647,29 @@ if [ -f $IOS/system.manifest ] && [ -f $CACHE/dyld_shared_cache_arm64 ] &&
 	# This stages the files; a separate XNU MPSS driver is still required to start the modem.
 	if [ -n "$MODEM" ]; then
 		[ -f ../fw-modem/modem.mdt ] || { echo "build.sh: MODEM=1 needs ../fw-modem/modem.mdt" >&2; exit 1; }
-		../devices/redwood/tools/modem_firmware.py --dtb ../devices/redwood/prebuilt/device-tree.dtb --firmware-dir ../fw-modem \
-			--node /soc/qcom,mss@4080000 >/dev/null
+		# MODEM_DTB= (empty) leaves this check out: it is redwood's memory map; miatoll's modem is placed by hakios.mpss.c's own
+		MODEM_DTB=${MODEM_DTB-../devices/redwood/prebuilt/device-tree.dtb}
+		if [ -n "$MODEM_DTB" ]; then
+			../devices/redwood/tools/modem_firmware.py --dtb "$MODEM_DTB" --firmware-dir ../fw-modem \
+				--node /soc/qcom,mss@4080000 >/dev/null
+		fi
 		mkdir -p sysroot/fw
 		cp ../fw-modem/modem.mdt ../fw-modem/modem.b[0-9][0-9] sysroot/fw/
 		# ... and the firmware partition's image/ (its mcfg configurations and the registry's *.jsn, pulled from
 		# the phone's /vendor/firmware_mnt/image into ../fw-modem/image), which the modem reads over TFTP (hakios.mpss.c)
 		if [ -d ../fw-modem/image ]; then
 			rm -rf sysroot/fw/image && cp -R ../fw-modem/image sysroot/fw/image
+			# MODEM_IMAGE_OMIT=<file>: names under image/ (globs, one a line, # for comments) the modem never reads, left
+			# out where the image has no room for them (devices/miatoll/modem-image.omit, a RAM boot of a 4 GB phone)
+			if [ -n "$MODEM_IMAGE_OMIT" ]; then
+				[ -f "$MODEM_IMAGE_OMIT" ] || { echo "build.sh: MODEM_IMAGE_OMIT: no file $MODEM_IMAGE_OMIT" >&2; exit 1; }
+				omit=$(cd "$(dirname "$MODEM_IMAGE_OMIT")" && pwd)/$(basename "$MODEM_IMAGE_OMIT")
+				(cd sysroot/fw/image && grep -v -e '^#' -e '^[[:space:]]*$' "$omit" | while read -r g; do
+					case "$g" in */*|..*) echo "build.sh: MODEM_IMAGE_OMIT: $g: names only, no paths" >&2; exit 1 ;; esac
+					rm -rf -- $g
+				done)
+				echo "build.sh: fw/image: $(ls sysroot/fw/image | wc -l | tr -d ' ') entries, $(du -sh sysroot/fw/image | cut -f1) after MODEM_IMAGE_OMIT"
+			fi
 		fi
 	fi
 	# ... and the speaker amplifiers' configuration, the phone's /vendor/etc/aw882xx_acf.bin (drivers/audio/hakios.speaker.c,
