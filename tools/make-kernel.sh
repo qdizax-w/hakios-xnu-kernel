@@ -19,7 +19,7 @@ KERNEL=${KERNEL:-xnu-src/xnu-8796.121.2/BUILD/obj/DEVELOPMENT_ARM64_BCM2837/mach
 # stand above them (config_all and the recursion into config/, and the top-level `all`)
 unexpected_failures() {
 	grep -E '^make(\[[0-9]+\])?: \*\*\* ' "$1" |
-		grep -vE '\.symbolset\]|check_all_exports|config_all|_recurse_into_config|\[Makefile:[0-9]+: all\]|^make: \*\*\* \[all\] Error'
+		grep -vE '\.symbolset\]|check_all_exports|config_all|_recurse_into_config|\[Makefile:[0-9]+: all\]|^make(\[[0-9]+\])?: \*\*\* \[all\] Error'
 }
 
 judge() { # judge LOG: 0 if the kernel is built and only the symbol-set steps failed
