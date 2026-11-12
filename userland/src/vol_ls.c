@@ -14,6 +14,8 @@
  *                                    driver's time went -- reads, page-ins, the lock)
  *        vol_ls zero NAME...         write to it (kern.apfs_stats: its counters zeroed)
  *        vol_ls cpuload SECONDS      how busy each processor is over the next SECONDS
+ *        vol_ls watch SECONDS COUNT NAME...   the sysctls NAME every SECONDS, COUNT times, one line each
+ *                                    (kern.hakios_memory: a session's memory as it goes, in its log)
  */
 #include <dirent.h>
 #include <errno.h>
@@ -219,6 +221,36 @@ main(int argc, char **argv)
 	}
 	if (strcmp(argv[1], "fs") == 0) {
 		return do_fs(argv[2]);
+	}
+	if (strcmp(argv[1], "watch") == 0) {
+		int secs = argc > 2 ? atoi(argv[2]) : 0, count = argc > 3 ? atoi(argv[3]) : 0;
+
+		if (secs < 1 || count < 1 || argc < 5) {
+			printf("usage: vol_ls watch SECONDS COUNT NAME...\n");
+			return 2;
+		}
+		for (int n = 1; n <= count; n++) {
+			for (i = 4; i < argc; i++) {
+				static char text[4096];
+				size_t len = sizeof(text) - 1;
+
+				if (sysctlbyname(argv[i], text, &len, NULL, 0) != 0) {
+					printf("watch %d: %s: %s\n", n * secs, argv[i], strerror(errno));
+					continue;
+				}
+				text[len] = 0;
+				len = strlen(text);
+				while (len > 0 && text[len - 1] == '\n') {
+					text[--len] = 0;
+				}
+				printf("watch %d s: %s\n", (n - 1) * secs, text);
+			}
+			fflush(stdout);
+			if (n < count) {
+				sleep((unsigned)secs);
+			}
+		}
+		return 0;
 	}
 	if (strcmp(argv[1], "cat") == 0) {
 		return do_cat(argv[2], argc > 3 ? atol(argv[3]) : 4096);

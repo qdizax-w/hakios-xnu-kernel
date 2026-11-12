@@ -1,0 +1,17 @@
+# Commands run by the launchd job com.hakios.demo (see com.hakios.demo.plist).
+# rc.jobs.unlock without the package manager's lines (no prefix in this image), and the memory every 5 s for 5 minutes in the log
+/redwood/bin/vol_ls watch 5 60 kern.hakios_memory &
+/redwood/bin/hello_dyn started by launchd
+/redwood/bin/svc_test
+/redwood/bin/surf_test
+/bin/ps -A
+# "swipe up to open": until somebody can do it with a finger
+/redwood/bin/rwtouch wait 32 swipe 0.5 0.985 0.5 0.3 250 &
+# Sileo (the package manager's prefix is in the image, grafted onto /var/jb by init): registered with
+# LaunchServices so that it is on the home screen, and the bootstrap's once-a-boot preparation
+# Sileo (the package manager's prefix is in the image, grafted onto /var/jb by init): registered with
+# LaunchServices so that it is on the home screen, and the bootstrap's once-a-boot preparation
+# a shell over the network (usbnet=1: `ssh root@10.42.0.100`), with the key in ssh/authorized_keys alone
+# (userland/build.sh puts it on the data volume; no key there, no way in): see rc.jobs.ssh
+# the extensions iOS runs on its own -- widgets above all -- at the background policy: they render on the CPU here and
+# took the home screen's time (widgets-background.sh)
