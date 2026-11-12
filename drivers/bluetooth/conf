@@ -4,4 +4,4 @@
 
 driver BT
 	file    bsd/dev/hakios.bt.c
-	help    the Bluetooth half of the WCN6750: step one, a read-only look at its three pins (bt=1)
+	help    Bluetooth, step one (bt=1), reading only: the WCN6750's three pins (redwood); the WCN3990's UART, its clocks and pins (miatoll)

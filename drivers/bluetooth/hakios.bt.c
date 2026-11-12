@@ -108,9 +108,105 @@ look(const char *when)
 	}
 }
 
+/*
+ * ---- miatoll (Redmi Note 9S, SM7125): the WCN3990's Bluetooth, STEP ONE, a look (bt=1), reading only -----------------
+ *
+ * The Bluetooth half of this phone's WCN3990 is on a UART: serial engine 3 of QUP 0 (the vendor's tree: qcom,qup_uart@88c000,
+ * "qcom,msm-geni-serial-hs"; mainline sc7180.dtsi: uart3, serial@88c000, SPI 604 level), pins GPIO 38 CTS, 39 RTS, 40 TX,
+ * 41 RX in the TLMM's south tile, function 1 ("qup03": pinctrl-sc7180.c). Its clocks are the GCC's (gcc-sc7180.c), all
+ * switched by votes in 0x52008: QUP 0's m-ahb (bit 6, status 0x17004), s-ahb (7, 0x17008), core (8, 0x1700c), core 2x
+ * (9, 0x17014) and the engine's own (13, 0x173c0; its rate's RCG at 0x173c4). Its supplies (the tree's bt_wcn3990):
+ * vdd-io L10A 1.8 V, vdd-core L2C 1.3 V, vdd-pa L10C 3.0-3.3 V, vdd-xtal L1C 1.8 V -- the last three already voted for by
+ * the Wi-Fi (hakios.wifi.c, miatoll_rails_on()).
+ *
+ * What this does: the GCC's votes and each clock's status bit, the RCG's settings, the four pins, and -- only if both of
+ * QUP 0's AHB clocks are running, since a read of a serial engine whose bus clock is off hangs the bus -- the engine's
+ * firmware revision (which protocol the boot chain loaded into it: 2 is UART), status, I/O and clock settings, and the
+ * wrapper's version. Nothing is written. Once at start, once bt_again seconds later (after the Wi-Fi's votes).
+ */
+#define MIATOLL_SOC_BASE        0x00100000ul    /* where the loader says miatoll's peripherals begin */
+#define M_GCC_PHYS              0x00100000UL
+#define M_GCC_SIZE              0x60000UL
+#define M_GCC_VOTE              0x52008
+#define M_CLK_OFF               (1u << 31)      /* a branch's status register: the clock is not running */
+#define M_SE3_RCG               0x173c4         /* CMD; CFG +4, M +8, N +0xc, D +0x10 */
+#define M_TLMM_SOUTH_PHYS       0x03d00000UL
+#define M_PIN_FIRST             38
+#define M_PIN_LAST              41
+#define M_SE3_PHYS              0x0088c000UL
+#define M_SE_SIZE               0x4000UL
+#define M_QUP0_PHYS             0x008c0000UL
+#define M_QUP0_SIZE             0x1000UL
+
+extern vm_offset_t pe_arm_get_soc_base_phys(void);
+
+static vm_offset_t m_gcc, m_pins, m_se3, m_qup0;
+
+static const struct {
+	uint32_t status;
+	unsigned vote;
+	const char *name;
+} m_clocks[] = {
+	{ 0x17004, 6, "QUP 0 m-ahb" }, { 0x17008, 7, "QUP 0 s-ahb" }, { 0x1700c, 8, "QUP 0 core" }, { 0x17014, 9, "QUP 0 core 2x" },
+	{ 0x173c0, 13, "QUP 0 serial engine 3" },
+};
+static const char *const m_pin_names[] = { "CTS", "RTS", "TX", "RX" };
+
+static void
+look_miatoll(const char *when)
+{
+	uint32_t vote = rd(m_gcc + M_GCC_VOTE);
+	bool ahb = true;
+
+	say("bt: %s: GCC votes (0x52008) %#x\n", when, vote);
+	for (unsigned i = 0; i < sizeof(m_clocks) / sizeof(m_clocks[0]); i++) {
+		uint32_t status = rd(m_gcc + m_clocks[i].status);
+
+		say("bt: %s: %s: voted %u, status %#x (%s)\n", when, m_clocks[i].name, (vote >> m_clocks[i].vote) & 1, status,
+		    (status & M_CLK_OFF) ? "OFF" : "running");
+		if (i < 2 && (status & M_CLK_OFF)) {
+			ahb = false;
+		}
+	}
+	say("bt: %s: its rate (RCG 0x173c4): cmd %#x, cfg %#x, m %#x, n %#x, d %#x\n", when, rd(m_gcc + M_SE3_RCG),
+	    rd(m_gcc + M_SE3_RCG + 4), rd(m_gcc + M_SE3_RCG + 8), rd(m_gcc + M_SE3_RCG + 0xc), rd(m_gcc + M_SE3_RCG + 0x10));
+	for (unsigned pin = M_PIN_FIRST; pin <= M_PIN_LAST; pin++) {
+		vm_offset_t regs = m_pins + 0x1000UL * (pin - M_PIN_FIRST);
+		uint32_t cfg = rd(regs), io = rd(regs + 4);
+
+		say("bt: %s: gpio%u (%s): function %u (1: the UART's), pull %u, %u mA, %s, reads %u\n", when, pin,
+		    m_pin_names[pin - M_PIN_FIRST], (cfg >> 2) & 15, cfg & 3, (((cfg >> 6) & 7) + 1) * 2,
+		    (cfg & CFG_OUTPUT) ? (io & 2 ? "drives high" : "drives low") : "input", io & 1);
+	}
+	if (!ahb) {
+		say("bt: %s: the serial engine's registers are NOT read: QUP 0's bus clocks are off (a read would hang the bus)\n",
+		    when);
+		return;
+	}
+	if (m_se3 == 0) {
+		m_se3 = ml_io_map(M_SE3_PHYS, M_SE_SIZE);
+		m_qup0 = ml_io_map(M_QUP0_PHYS, M_QUP0_SIZE);
+	}
+	if (m_se3 == 0 || m_qup0 == 0) {
+		say("bt: %s: could not map the serial engine\n", when);
+		return;
+	}
+	{
+		uint32_t fw = rd(m_se3 + 0x68);
+
+		say("bt: %s: QUP 0 version %#x; engine 3: firmware %#x (protocol %u: 0 none, 1 SPI, 2 UART, 3 I2C), status %#x, "
+		    "I/O disabled %#x, clock %#x, hardware %#x\n", when, rd(m_qup0 + 0x4), fw, (fw >> 8) & 0xff, rd(m_se3 + 0x40),
+		    rd(m_se3 + 0x64), rd(m_se3 + 0x48), rd(m_se3 + 0xe24));
+	}
+}
+
 static void
 look_again(__unused thread_call_param_t p0, __unused thread_call_param_t p1)
 {
+	if (m_gcc != 0) {
+		look_miatoll("again");
+		return;
+	}
 	look("again");
 }
 
@@ -126,6 +222,23 @@ bt_init(void)
 	}
 	if (PE_parse_boot_argn("bt_again", &value, sizeof(value)) && value <= 3600) {
 		again_seconds = value;
+	}
+	if (pe_arm_get_soc_base_phys() == MIATOLL_SOC_BASE) {
+		m_gcc = ml_io_map(M_GCC_PHYS, M_GCC_SIZE);
+		m_pins = ml_io_map(M_TLMM_SOUTH_PHYS + 0x1000UL * M_PIN_FIRST, 0x1000UL * (M_PIN_LAST - M_PIN_FIRST + 1));
+		if (m_gcc == 0 || m_pins == 0) {
+			say("bt: could not map the GCC or the TLMM's south tile; off\n");
+			m_gcc = 0;
+			return;
+		}
+		say("bt: level 1: a look, reading only (miatoll's WCN3990: its UART, QUP 0 engine 3; nothing is written)\n");
+		look_miatoll("at start");
+		if (again_seconds != 0) {
+			again_call = thread_call_allocate(look_again, NULL);
+			clock_interval_to_deadline(again_seconds, NSEC_PER_SEC, &deadline);
+			thread_call_enter_delayed(again_call, deadline);
+		}
+		return;
 	}
 	tlmm = ml_io_map(TLMM_PHYS, TLMM_SIZE);
 	if (tlmm == 0) {
