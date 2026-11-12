@@ -583,11 +583,13 @@ static const struct darwin_id darwin_redwood = {
 	.unique = { 0xfd6854ad, 0x24aa, 0x4fc3, { 0x94, 0xfe, 0x29, 0x01, 0x16, 0x85, 0x8d, 0x68 } },
 };
 
-/* miatoll's (the Redmi Note 9S it was made on): entry 19, the end of what was userdata, parted's "Linux data" type */
+/* miatoll's (this Redmi Note 9S, 64 GB, repartitioned on 11 November 2026): entry 19, the last 15 GiB of what was
+ * userdata (from its first 2 MB boundary to the end of the unit: 3932155 blocks), parted's "Linux data" type.
+ * (The phone the port was made on had 20 GiB here: first 9256960, unique ded36df0-2641-4a00-b525-2f880baf96c5.) */
 static const struct darwin_id darwin_miatoll = {
-	.first = 9256960ULL, .last = 14499834ULL,
+	.first = 10567680ULL, .last = 14499834ULL,
 	.type = { 0x0fc63daf, 0x8483, 0x4772, { 0x8e, 0x79, 0x3d, 0x69, 0xd8, 0x47, 0x7d, 0xe4 } },
-	.unique = { 0xded36df0, 0x2641, 0x4a00, { 0xb5, 0x25, 0x2f, 0x88, 0x0b, 0xaf, 0x96, 0xc5 } },
+	.unique = { 0xb581e141, 0xc857, 0x47ad, { 0xa5, 0xc7, 0x6b, 0x23, 0xa1, 0xf7, 0x7b, 0xe1 } },
 };
 
 struct platform {

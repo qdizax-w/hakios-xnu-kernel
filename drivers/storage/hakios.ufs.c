@@ -77,7 +77,7 @@ extern void FlushPoC_DcacheRegion(vm_offset_t va, size_t length);   /* osfmk/arm
  */
 #define UFS_WRITE_FIRST    2042368ULL                  /* darwin's blocks of 4096 */
 #define UFS_DARWIN_FIRST   ufs_darwin_first()          /* its first LBA on the unit, as the GPT has it */
-#define UFS_DARWIN_BLOCKS  5242875ULL                  /* (on both phones) */
+#define UFS_DARWIN_BLOCKS  ufs_darwin_blocks()         /* its size in blocks of 4096, as the GPT has it */
 
 /*
  * Where darwin begins on each phone: redwood's entry 34; miatoll's entry 19, made on 24 October 2026
@@ -89,7 +89,15 @@ extern vm_offset_t pe_arm_get_soc_base_phys(void);
 static uint64_t
 ufs_darwin_first(void)
 {
-	return pe_arm_get_soc_base_phys() == 0x00100000ul ? 9256960ULL : 25374720ULL;
+	/* miatoll: this phone's 15 GiB, repartitioned on 11 November 2026 (the port's first phone: 9256960) */
+	return pe_arm_get_soc_base_phys() == 0x00100000ul ? 10567680ULL : 25374720ULL;
+}
+
+/* ... and how many blocks it has: miatoll's 15 GiB (to 14499834), redwood's 20 GiB */
+static uint64_t
+ufs_darwin_blocks(void)
+{
+	return pe_arm_get_soc_base_phys() == 0x00100000ul ? 3932155ULL : 5242875ULL;
 }
 
 struct loader_block_part {
