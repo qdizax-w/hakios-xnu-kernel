@@ -403,6 +403,7 @@ static struct {
 	bool attached;
 } lx_vector[LX_VECTORS];
 static uint32_t lx_irq_first;                   /* the GIC's number of vector 0; 0: no interrupts */
+static bool lx_irq_level;                       /* wired, level-triggered lines (lx_os_irq_wired()), not MSIs */
 static uint32_t lx_irq_pending;                 /* the vectors that have fired and are not dealt with yet */
 static uint32_t lx_irq_running;                 /* the vectors whose function the thread is in */
 static thread_t lx_irq_thread;
@@ -463,6 +464,23 @@ lx_os_irq_msi(unsigned long long *address, unsigned *data)
 	return 1;
 }
 
+/*
+ * A radio whose interrupts are wires to the GIC, not messages (miatoll's WCN3990: dt qcom,icnss@18800000, its twelve
+ * "interrupts", SPIs 414..425 level-high, the copy engines' in order): vector v is INTID first + v, level-triggered. The
+ * rest is as for MSIs: masked when one arrives (which quiets a level-triggered line until the function has done its work),
+ * the function run on the thread, and unmasked again by lx_os_irq_enable(). 1, or 0 if the number is no SPI's.
+ */
+int
+lx_os_irq_wired(unsigned first_intid, int level)
+{
+	if (first_intid < 32 || first_intid + LX_VECTORS > 1020) {
+		return 0;
+	}
+	lx_irq_first = first_intid;
+	lx_irq_level = level != 0;
+	return 1;
+}
+
 int
 lx_os_irq_attach(unsigned vector, void (*function)(void *), void *argument)
 {
@@ -472,8 +490,8 @@ lx_os_irq_attach(unsigned vector, void (*function)(void *), void *argument)
 		return EINVAL;
 	}
 	if (lx_irq_thread == THREAD_NULL) {
-		hakios_wifi_tell("lx: wifi_irq: THE GIC'S DISTRIBUTOR IS WRITTEN for the radio's interrupts: each vector's SPI (%u + v) edge-"
-		    "triggered, group 1, routed to this processor, then enabled\n", lx_irq_first);
+		hakios_wifi_tell("lx: wifi_irq: THE GIC'S DISTRIBUTOR IS WRITTEN for the radio's interrupts: each vector's INTID (%u + v) %s-"
+		    "triggered, group 1, routed to this processor, then enabled\n", lx_irq_first, lx_irq_level ? "level" : "edge");
 		if (kernel_thread_start(lx_irq_runs, NULL, &lx_irq_thread) != KERN_SUCCESS) {
 			lx_irq_thread = THREAD_NULL;
 			return ENOMEM;
@@ -485,7 +503,7 @@ lx_os_irq_attach(unsigned vector, void (*function)(void *), void *argument)
 	lx_vector[vector].argument = argument;
 	lx_vector[vector].attached = true;
 	lck_mtx_unlock(&lx_irq_lock);
-	if ((kr = gic_v3_spi_attach(lx_irq_first + vector, true, lx_irq_arrived, NULL)) != KERN_SUCCESS) {
+	if ((kr = gic_v3_spi_attach(lx_irq_first + vector, !lx_irq_level, lx_irq_arrived, NULL)) != KERN_SUCCESS) {
 		lck_mtx_lock(&lx_irq_lock);
 		lx_vector[vector].attached = false;
 		lck_mtx_unlock(&lx_irq_lock);
@@ -557,6 +575,47 @@ void
 lx_os_station_lost(int error)
 {
 	hakios_sta_lost(error);
+}
+
+/* (drivers/modem/hakios.mpss.c; weak, for a kernel built without the modem's driver: then no radio of this kind either) */
+extern uint32_t hakios_mpss_smp2p_bits(const char *name) __attribute__((weak));
+extern void hakios_mpss_show_crash_reason(void) __attribute__((weak));
+
+/*
+ * The radio's firmware is the modem's (miatoll): when it stops, the modem says so in its SMP2P entry "wlan" -- bit 1 "early
+ * crash", bit 0 "force fatal" -- or, if the whole modem stops, bit 0 of its "slave-kernel". Linux's icnss takes those as
+ * interrupts and stops the driver before it touches the radio again; here the poller asks before each look (lx_snoc.c).
+ * Every change of those words is said, with the time, so that a run's log shows what the modem did whatever follows.
+ */
+int
+lx_os_radio_gone(void)
+{
+	static uint32_t last_wlan = 0x5a5a5a5au, last_modem = 0x5a5a5a5au;
+	static int gone;
+	uint32_t wlan, modem;
+	uint64_t ns;
+
+	if (gone || hakios_mpss_smp2p_bits == NULL) {
+		return gone;
+	}
+	wlan = hakios_mpss_smp2p_bits("wlan");
+	modem = hakios_mpss_smp2p_bits("slave-kernel");
+	if (wlan != last_wlan || modem != last_modem) {
+		absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
+		printf("lx: the modem's SMP2P at %llu.%03llu s: \"wlan\" %#x, \"slave-kernel\" %#x\n", ns / 1000000000,
+		    ns / 1000000 % 1000, wlan, modem);
+		last_wlan = wlan;
+		last_modem = modem;
+	}
+	if ((wlan != ~0u && (wlan & 3) != 0) || (modem != ~0u && (modem & 1) != 0)) {
+		gone = 1;
+		printf("lx: THE RADIO'S FIRMWARE HAS STOPPED (the modem's \"wlan\" %#x, \"slave-kernel\" %#x): nothing of the radio "
+		    "is touched again\n", wlan, modem);
+		if (hakios_mpss_show_crash_reason != NULL) {
+			hakios_mpss_show_crash_reason();
+		}
+	}
+	return gone;
 }
 
 /* ---- the driver ---------------------------------------------------------------------------------------- */

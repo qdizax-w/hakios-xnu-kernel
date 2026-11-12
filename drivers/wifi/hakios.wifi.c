@@ -348,13 +348,15 @@ hakios_wifi_option(const char *name)
 	} stands_for[] = { { "wifi_lx", 2 }, { "wifi_smmu", 2 }, { "wifi_station", 1 }, { "wifi_keep", 1 }, { "wifi_irq", 1 },
 			   { "wifi_ba", 1 }, { "wifi_wide", 1 } };
 	/*
-	 * miatoll (ath10k, wifi/lx/src10/lx_snoc.c): its copy engines are looked at, not interrupted (wifi_irq is the
-	 * WCN6750's); the firmware answers the access point's requests for block acks itself; 20 MHz channels to begin with.
+	 * miatoll (ath10k, wifi/lx/src10/lx_snoc.c): its copy engines are taken care of when they interrupt -- the device
+	 * tree's twelve wires, as Linux does (wifi_irq=0: looked at once a millisecond, which read the engines while the radio
+	 * idled and ended the system with an SError some 15 s after it was up); the firmware answers the access point's
+	 * requests for block acks itself; 20 MHz channels to begin with.
 	 */
 	static const struct {
 		const char *name;
 		uint32_t value;
-	} stands_for_miatoll[] = { { "wifi_irq", 0 }, { "wifi_ba", 0 }, { "wifi_wide", 0 } };
+	} stands_for_miatoll[] = { { "wifi_irq", 1 }, { "wifi_ba", 0 }, { "wifi_wide", 0 } };
 	uint32_t value = 0;
 
 	if (strcmp(name, "wifi_quiet") == 0) {
@@ -903,7 +905,9 @@ step_mailbox(void)
 /* ---- step 3: RPMh -------------------------------------------------------------------------------------- */
 
 /* dt: reserved-memory cmd_db@80860000: the boot loader's list of what RPMh can switch (cmd-db.c; as in hakios.adreno.c) */
-#define CMD_DB_PHYS             0x80860000UL
+/* (miatoll's is where its AOP says, 0x80820000: hakios.adreno.c step 1, hakios.cpufreq.c cmd_db_phys(); 0x80860000 is redwood's) */
+extern vm_offset_t pe_arm_get_soc_base_phys(void);
+#define CMD_DB_PHYS             (pe_arm_get_soc_base_phys() == 0x00100000ul ? 0x80820000UL : 0x80860000UL)
 #define CMD_DB_SIZE             0x20000UL
 
 struct cmd_db_slave {
@@ -4444,6 +4448,187 @@ miatoll_radio_address(uint8_t *address)
 	return true;
 }
 
+/*
+ * The radio's supplies, voted for by the application processor as Android's icnss driver does (dt: qcom,icnss@18800000,
+ * vdd-*-supply; downstream icnss.c's table, with the tree's qcom,vdd-cx-mx-config and qcom,vdd-3.3-ch*-config), before the
+ * driver first touches the copy engines and for as long as the radio is up. Without them the rails were on only by others'
+ * votes -- the boot chain's and the modem's, which the modem gives up a little after it has started (a proxy vote): about
+ * 15 s after the radio was up its registers went away under the poller, and the next read of a copy engine ended the system
+ * with an SError ("Unhandled implementation specific error", ath10k_ce_completed_send_next via looker(); 12 November 2026).
+ * A vote can only keep a rail on: RPMh grants the highest of all its voters'. wifi_rails=0 leaves them as they are.
+ */
+#define MIATOLL_RSC_PHYS        0x18220000UL    /* the application processor's "DRV 2" (as hakios.goodix.c, hakios.cpufreq.c) */
+#define MIATOLL_RSC_SIZE        0x10000UL
+#define MIATOLL_TCS(reg)        (miatoll_rsc + 0xd00 + (reg))   /* command slot set 0, an "active" one */
+#define VRM_VOLTAGE             0               /* a regulator's registers, from its address: millivolts */
+#define VRM_ENABLE              4
+#define VRM_MODE                8
+#define VRM_MODE_LDO_HPM        7
+
+static vm_offset_t miatoll_rsc;
+
+static uint32_t
+miatoll_tcs_rd(uint32_t reg)
+{
+	return *(volatile uint32_t *)MIATOLL_TCS(reg);
+}
+
+static void
+miatoll_tcs_wr(uint32_t reg, uint32_t value)
+{
+	*(volatile uint32_t *)MIATOLL_TCS(reg) = value;
+}
+
+/* Up to three writes to RPMh through slot set 0, and the wait until they are done (the sequence of hakios.goodix.c) */
+static bool
+miatoll_rpmh_write(const uint32_t *address, const uint32_t *data, unsigned count)
+{
+	uint32_t irq_enable;
+	bool done = false;
+
+	lck_mtx_lock(&hakios_rsc_lock);
+	irq_enable = miatoll_tcs_rd(0x00);
+	for (int i = 0; miatoll_tcs_rd(0x18) == 0; i++) {              /* the slot set idle */
+		if (i > 2000) {
+			lck_mtx_unlock(&hakios_rsc_lock);
+			tell("wifi: RPMh: the command slots stay busy\n");
+			return false;
+		}
+		delay_for_interval(100, NSEC_PER_USEC);
+	}
+	miatoll_tcs_wr(0x14, miatoll_tcs_rd(0x14) & ~(1u << 24));      /* trigger off, then enable off */
+	miatoll_tcs_wr(0x14, miatoll_tcs_rd(0x14) & ~(1u << 16));
+	miatoll_tcs_wr(0x08, 1);
+	for (unsigned i = 0; i < count; i++) {
+		miatoll_tcs_wr(0x30 + 20 * i, 0x10008 | 0x100);         /* a 4-byte write, with a response */
+		miatoll_tcs_wr(0x34 + 20 * i, address[i]);
+		miatoll_tcs_wr(0x38 + 20 * i, data[i]);
+	}
+	miatoll_tcs_wr(0x10, (1u << count) - 1);
+	miatoll_tcs_wr(0x1c, (1u << count) - 1);
+	miatoll_tcs_wr(0x00, irq_enable | 1);
+	miatoll_tcs_wr(0x14, 1u << 16);
+	miatoll_tcs_wr(0x14, 1u << 16 | 1u << 24);
+	for (int i = 0; i < 2000 && !done; i++) {
+		done = (miatoll_tcs_rd(0x04) & 1) != 0;
+		if (!done) {
+			delay_for_interval(100, NSEC_PER_USEC);
+		}
+	}
+	miatoll_tcs_wr(0x14, miatoll_tcs_rd(0x14) & ~(1u << 24));
+	miatoll_tcs_wr(0x14, miatoll_tcs_rd(0x14) & ~(1u << 16));
+	miatoll_tcs_wr(0x1c, 0);
+	miatoll_tcs_wr(0x10, 0);
+	miatoll_tcs_wr(0x08, 1);
+	miatoll_tcs_wr(0x00, irq_enable);
+	lck_mtx_unlock(&hakios_rsc_lock);
+	return done;
+}
+
+static unsigned miatoll_rails_voted;           /* of the five, for hakios_wifi_note() */
+static bool miatoll_clock_voted;
+static uint64_t miatoll_up_us;                  /* when the radio was up (now_us()), 0: not yet */
+
+/*
+ * The radio's reference clock: upstream Linux's sc7180 tree gives the Wi-Fi node "cxo_ref_clk_pin", RPMh's RF clock 2
+ * ("rfclka2", a VRM-type clock: clk-rpmh.c writes 1 at its address + 4 to have it on). Android's tree names no clock for
+ * icnss -- there the modem keeps it -- so it is voted for here as well, for when the modem lets go of it.
+ */
+static bool
+miatoll_clock_on(void)
+{
+	const struct cmd_db_entry *entry = rpmh_resource("rfclka2", 0);
+	uint32_t base = entry != NULL ? entry->address : 0;
+	uint32_t address[1] = { base + VRM_ENABLE };
+	uint32_t data[1] = { 1 };
+
+	if (base == 0 || (base >> 16 & 0xf) != 4) {
+		tell("wifi: RPMh: no clock \"rfclka2\" (address %#x): the radio's reference clock not voted for\n", base);
+		return false;
+	}
+	if (!miatoll_rpmh_write(address, data, 1)) {
+		tell("wifi: RPMh: the vote for the radio's reference clock (rfclka2) was not answered\n");
+		return false;
+	}
+	tell("wifi: RPMh: the radio's reference clock on (rfclka2 at %#x)\n", base);
+	return true;
+}
+
+/* For the end of a run, whatever it was (osfmk/arm64/loader_return.c): the radio's supplies, its clock, when it was up */
+void hakios_wifi_note(char *buffer, size_t size);
+extern uint32_t hakios_mpss_smp2p_bits(const char *name) __attribute__((weak));        /* (shared memory only: no lock) */
+
+void
+hakios_wifi_note(char *buffer, size_t size)
+{
+	uint64_t now = now_us();
+	uint32_t wlan = ~0u, modem = ~0u;
+
+	if (!miatoll) {
+		buffer[0] = 0;
+		return;
+	}
+	if (hakios_mpss_smp2p_bits != NULL) {
+		wlan = hakios_mpss_smp2p_bits("wlan");
+		modem = hakios_mpss_smp2p_bits("slave-kernel");
+	}
+	snprintf(buffer, size, "wifi: at the end: %u of 5 supplies voted for, the reference clock %s; the radio %s%llu.%llu s before; "
+	    "the modem's SMP2P \"wlan\" %#x, \"slave-kernel\" %#x\n",
+	    miatoll_rails_voted, miatoll_clock_voted ? "voted for" : "NOT voted for",
+	    miatoll_up_us != 0 ? "up " : "not up yet; the system began ",
+	    (now - miatoll_up_us) / 1000000, (now - miatoll_up_us) / 100000 % 10, wlan, modem);
+}
+
+static bool
+miatoll_rails_on(void)
+{
+	static const struct {
+		const char *resource, *supply;
+		uint32_t millivolts;
+	} rails[] = {
+		{ "ldoa9",  "vdd-cx-mx (PM6150 L9)",    640 },
+		{ "ldoc1",  "vdd-1.8-xo (PM6150L L1)",  1800 },
+		{ "ldoc2",  "vdd-1.3-rfa (PM6150L L2)", 1304 },
+		{ "ldoc10", "vdd-3.3-ch0 (PM6150L L10)", 3000 },
+		{ "ldoc11", "vdd-3.3-ch1 (PM6150L L11)", 3000 },
+	};
+	uint32_t on = 1;
+	bool all = true;
+
+	PE_parse_boot_argn("wifi_rails", &on, sizeof(on));
+	if (on == 0) {
+		tell("wifi: the radio's supplies are left to the others' votes (wifi_rails=0)\n");
+		return true;
+	}
+	if (miatoll_rsc == 0) {
+		miatoll_rsc = ml_io_map(MIATOLL_RSC_PHYS, MIATOLL_RSC_SIZE);
+	}
+	for (unsigned i = 0; i < sizeof(rails) / sizeof(rails[0]); i++) {
+		const struct cmd_db_entry *entry = rpmh_resource(rails[i].resource, 0);
+		uint32_t base = entry != NULL ? entry->address : 0;
+		uint32_t address[3] = { base + VRM_VOLTAGE, base + VRM_ENABLE, base + VRM_MODE };
+		uint32_t data[3] = { rails[i].millivolts, 1, VRM_MODE_LDO_HPM };
+
+		/* (a regulator's address has 4 in bits 19:16: anything else is not one, and nothing is written to it) */
+		if (base == 0 || (base >> 16 & 0xf) != 4) {
+			tell("wifi: RPMh: no regulator \"%s\" (address %#x): %s not voted for\n", rails[i].resource, base,
+			    rails[i].supply);
+			all = false;
+			continue;
+		}
+		if (miatoll_rpmh_write(address, data, 3)) {
+			miatoll_rails_voted++;
+			tell("wifi: RPMh: %s on, %u mV, high-power mode (%s at %#x)\n", rails[i].supply, rails[i].millivolts,
+			    rails[i].resource, base);
+		} else {
+			tell("wifi: RPMh: the vote for %s (%s) was not answered\n", rails[i].supply, rails[i].resource);
+			all = false;
+		}
+	}
+	miatoll_clock_voted = miatoll_clock_on();
+	return all && miatoll_clock_voted;
+}
+
 static void
 miatoll_thread(__unused void *parameter, __unused wait_result_t result)
 {
@@ -4457,10 +4642,14 @@ miatoll_thread(__unused void *parameter, __unused wait_result_t result)
 		whole_runs = false;
 		thread_terminate(current_thread());
 	}
+	if (!miatoll_rails_on()) {
+		tell("wifi: not every supply of the radio could be voted for: it is brought up all the same\n");
+	}
 	hakios_qmi_set_transport(transport);
 	tell("wifi: the modem's Wi-Fi firmware is ready: now the driver (ath10k)\n");
 	error = hakios_lx_start();
 	if (error == 0) {
+		miatoll_up_us = now_us();
 		tell("wifi: THE RADIO IS UP, %llu.%llu s after the firmware said it was ready\n", (now_us() - began) / 1000000,
 		    (now_us() - began) / 100000 % 10);
 		join_given(began);

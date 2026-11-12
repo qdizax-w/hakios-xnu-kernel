@@ -588,6 +588,34 @@ show_crash_reason(void)
 	}
 }
 
+/*
+ * For the Wi-Fi (hakios.lx.c, lx_os_radio_gone(); hakios.wifi.c): the value of one of the modem's SMP2P entries -- "wlan"
+ * (dt: qcom,smp2p-wlan-1-in of qcom,smp2p-modem, which qcom,icnss@18800000 takes as bit 0 "force-fatal-error" and bit 1
+ * "early-crash-ind"), "slave-kernel" (bit 0: the modem's own fatal error). ~0u: no such entry, or no SMP2P item yet. Shared
+ * memory read and nothing else -- no lock, no sleep: the radio's poller asks every millisecond, and the end of a run too.
+ */
+uint32_t hakios_mpss_smp2p_bits(const char *name);
+void hakios_mpss_show_crash_reason(void);
+
+uint32_t
+hakios_mpss_smp2p_bits(const char *name)
+{
+	struct smp2p words;
+	int entry;
+
+	if (!dsp_words(&words)) {
+		return ~0u;
+	}
+	entry = smp2p_entry(&words, name);
+	return entry < 0 ? ~0u : words.entry[entry].value;
+}
+
+void
+hakios_mpss_show_crash_reason(void)
+{
+	show_crash_reason();
+}
+
 /* ---- the doorbells, and the mailbox to the always-on processor (hakios.wifi.c, steps 2 and 7) ------ */
 
 #define QMP_MAGIC               0x00

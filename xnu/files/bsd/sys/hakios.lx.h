@@ -77,6 +77,7 @@ void	 lx_os_net_input(const unsigned char *frame, unsigned long length);	/* an E
  * lx_os_irq_enable(). Nothing of the driver runs in an interrupt.
  */
 int	 lx_os_irq_msi(unsigned long long *address, unsigned *data);	/* where and what: 1, or 0 (no interrupts) */
+int	 lx_os_irq_wired(unsigned first_intid, int level);	/* instead: wires to the GIC, vector v = INTID first + v: 1, or 0 */
 int	 lx_os_irq_attach(unsigned vector, void (*function)(void *), void *argument);	/* masked to begin with; 0 or an errno */
 void	 lx_os_irq_enable(unsigned vector);
 void	 lx_os_irq_disable(unsigned vector);			/* returns when its function is not running */
@@ -86,6 +87,12 @@ unsigned long long lx_os_irq_count(unsigned vector);		/* how many have arrived *
 /* ---- the station: scanning and joining, for whoever asks the kernel (hakios.sta.h) ---- */
 void	 lx_os_station(const struct hakios_sta_ops *ops);	/* here it is, to be asked; NULL: no longer (returns when no call is under way) */
 void	 lx_os_station_lost(int error);				/* the network joined is gone by itself */
+/*
+ * (miatoll) asked before every look at the radio's copy engines: has the radio's firmware stopped -- the modem's SMP2P entry
+ * "wlan" says early-crash or fatal, or the modem itself is fatal? Then nothing of the radio may be touched again: its
+ * registers go with the firmware, and a read of them ends the system (an SError). 1 from then on, else 0.
+ */
+int	 lx_os_radio_gone(void);
 
 /*
  * ---- the names the object shows the kernel. lx_start(): bring the driver up on the radio and

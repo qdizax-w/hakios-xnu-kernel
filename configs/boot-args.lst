@@ -323,6 +323,7 @@ wifi_new	k
 wifi_pause	k
 wifi_quiet	k
 wifi_radio_read	k
+wifi_rails	k
 wifi_ready	k
 wifi_return	k
 wifi_scan	k

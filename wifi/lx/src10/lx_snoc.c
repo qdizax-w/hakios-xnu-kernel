@@ -50,6 +50,9 @@ static struct {
 	volatile bool polling;		/* the thread is in the driver right now */
 	volatile bool looking;		/* the thread is wanted ... */
 	volatile bool looks;		/* ... and runs */
+	volatile bool gone;		/* the radio's firmware has stopped (lx_os_radio_gone()): its registers are not touched again */
+	bool irq_mode;			/* the copy engines' interrupts are taken (wifi_irq): NAPI runs when one has come, as on Linux */
+	volatile bool napi_wanted;	/* ... and it has been scheduled (napi_schedule()) */
 	unsigned long long polls, busy;	/* looks at the copy engines, and of them those that found work */
 	struct {
 		irq_handler_t handler;
@@ -312,7 +315,30 @@ lx_qmi_send_request(struct qmi_handle *qmi, struct sockaddr_qrtr *sq, struct qmi
 	return (qmi_send_request(qmi, sq, txn, msg_id, largest, ei, structure));
 }
 
-/* ---- the copy engines' interrupts: noted, and looked for instead ------------------------------------------ */
+/*
+ * ---- the copy engines' interrupts ----------------------------------------------------------------------------
+ *
+ * With wifi_irq (on by default on this phone, hakios.wifi.c) they are the GIC's: the twelve wires of the device tree
+ * (qcom,icnss@18800000: SPIs 414..425, INTIDs 446..457, level-high, copy engine n on the n-th), taken through the kernel's
+ * lx_os_irq_*() -- masked when one arrives, the handler snoc.c gave request_irq() run on the kernel's interrupt thread
+ * (it switches the engine's interrupt off in the engine, notes it pending and schedules NAPI), the wire unmasked again.
+ * The engines' registers are then touched only after an engine has asked, as on Linux. Polling every engine once a
+ * millisecond instead (wifi_irq=0, as before) read them while the radio idled, and about 15 s after it was up one such
+ * read ended the system with an SError (ath10k_ce_completed_send_next via the poller, 12 November 2026).
+ */
+#define LX_IRQ_FIRST_INTID	446		/* SPI 414 */
+
+static void
+ce_irq_arrived(void *argument)
+{
+	unsigned int n = (unsigned int)(uintptr_t)argument;
+
+	if (bus.gone || n >= CE_COUNT_MAX || bus.irq[n].handler == NULL || !bus.irq[n].enabled) {
+		return;			/* (left masked: enable_irq() unmasks it) */
+	}
+	bus.irq[n].handler(LX_IRQ + n, bus.irq[n].argument);
+	lx_os_irq_enable(n);
+}
 
 int
 lkpi_request_irq(struct device *dev, unsigned int irq, irq_handler_t handler, irq_handler_t thread_handler, unsigned long flags,
@@ -326,6 +352,9 @@ lkpi_request_irq(struct device *dev, unsigned int irq, irq_handler_t handler, ir
 	bus.irq[n].handler = handler;
 	bus.irq[n].argument = argument;
 	bus.irq[n].enabled = !(flags & IRQF_NO_AUTOEN);
+	if (bus.irq_mode && bus.irq[n].enabled) {
+		lx_os_irq_enable(n);
+	}
 	return (0);
 }
 
@@ -334,6 +363,9 @@ lkpi_enable_irq(unsigned int irq)
 {
 	if (irq - LX_IRQ < CE_COUNT_MAX) {
 		bus.irq[irq - LX_IRQ].enabled = true;
+		if (bus.irq_mode) {
+			lx_os_irq_enable(irq - LX_IRQ);
+		}
 	}
 	return (0);
 }
@@ -343,6 +375,9 @@ lkpi_disable_irq(unsigned int irq)
 {
 	if (irq - LX_IRQ < CE_COUNT_MAX) {
 		bus.irq[irq - LX_IRQ].enabled = false;
+		if (bus.irq_mode) {
+			lx_os_irq_disable(irq - LX_IRQ);	/* (returns when its function is not running) */
+		}
 	}
 }
 
@@ -350,8 +385,11 @@ void
 lkpi_free_irq(unsigned int irq, void *argument)
 {
 	if (irq - LX_IRQ < CE_COUNT_MAX) {
-		bus.irq[irq - LX_IRQ].handler = NULL;
 		bus.irq[irq - LX_IRQ].enabled = false;
+		if (bus.irq_mode) {
+			lx_os_irq_disable(irq - LX_IRQ);
+		}
+		bus.irq[irq - LX_IRQ].handler = NULL;
 	}
 }
 
@@ -416,17 +454,20 @@ linuxkpi_napi_schedule_prep(struct napi_struct *napi)
 void
 linuxkpi___napi_schedule(struct napi_struct *napi)
 {
+	bus.napi_wanted = true;		/* (wifi_irq: the thread runs the driver's poll; without, it looks every ms anyway) */
 }
 
 bool
 linuxkpi_napi_schedule(struct napi_struct *napi)
 {
-	return (true);			/* (the thread looks once a millisecond anyway) */
+	bus.napi_wanted = true;
+	return (true);
 }
 
 void
 linuxkpi_napi_reschedule(struct napi_struct *napi)
 {
+	bus.napi_wanted = true;
 }
 
 bool
@@ -477,6 +518,51 @@ looker(void *argument)
 		struct ath10k *ar = bus.ar;
 		int done = 0;
 
+		/*
+		 * Before each look: has the firmware stopped (the modem's SMP2P)? Its registers go with it, and reading one then
+		 * ended the system with an SError, about 17 s after the radio was up (12 November 2026). From then on the driver
+		 * is as after a crash -- its flush flag set, its state "wedged", so that it sends nothing either (htc.c) -- and the
+		 * copy engines are not looked at again.
+		 */
+		if (!bus.gone && lx_os_radio_gone()) {
+			bus.gone = true;
+			if (ar != NULL) {
+				set_bit(ATH10K_FLAG_CRASH_FLUSH, &ar->dev_flags);
+				ar->state = ATH10K_STATE_WEDGED;
+			}
+		}
+		if (bus.gone) {
+			lx_pause_ms(10);
+			continue;
+		}
+		if (bus.irq_mode) {
+			/*
+			 * wifi_irq: only when an engine's interrupt has scheduled NAPI, the driver's own poll -- snoc.c's
+			 * ath10k_snoc_napi_poll(): the engines that interrupted, each one's interrupt on again, then the data
+			 * path's completions -- and at once again while it has a whole budget's worth. Nothing else touches the
+			 * engines from here: idle, the radio is left alone.
+			 */
+			bool more = false;
+
+			bus.polling = true;
+			__asm__ volatile ("dmb ish" ::: "memory");
+			if (ar != NULL && bus.napi_on && bus.napi != NULL && bus.napi_wanted &&
+			    !test_bit(ATH10K_FLAG_CRASH_FLUSH, &ar->dev_flags)) {
+				bus.napi_wanted = false;
+				__asm__ volatile ("dmb ish" ::: "memory");
+				done = bus.napi->poll(bus.napi, 64);
+				bus.polls++;
+				bus.busy += done != 0;
+				if (done >= 64) {
+					bus.napi_wanted = more = true;
+				}
+			}
+			bus.polling = false;
+			if (!more) {
+				lx_pause_ms(1);		/* (also while NAPI is wanted but off: never a spin) */
+			}
+			continue;
+		}
 		bus.polling = true;
 		__asm__ volatile ("dmb ish" ::: "memory");
 		if (ar != NULL && bus.napi_on && !test_bit(ATH10K_FLAG_CRASH_FLUSH, &ar->dev_flags)) {
@@ -550,17 +636,42 @@ lx_start(void)
 	radio_device.irqs = radio_irqs;
 	radio_device.num_irqs = ARRAY_SIZE(radio_irqs);
 
+	/* wifi_irq: the engines' twelve wires taken before the probe, which requests them; masked until the driver enables them */
+	bus.irq_mode = false;
+	bus.napi_wanted = false;
+	if (lx_os_option("wifi_irq")) {
+		int failed = lx_os_irq_wired(LX_IRQ_FIRST_INTID, 1) ? 0 : EINVAL;
+
+		for (unsigned int n = 0; n < CE_COUNT_MAX && failed == 0; n++) {
+			failed = lx_os_irq_attach(n, ce_irq_arrived, (void *)(uintptr_t)n);
+		}
+		if (failed != 0) {
+			lx_tell("lx: wifi_irq: the copy engines' interrupts cannot be had (%d): they are looked at once a millisecond\n",
+			    failed);
+			lx_os_irq_detach_all();
+		} else {
+			bus.irq_mode = true;
+		}
+	}
 	bus.looking = true;
 	if (lx_os_thread("wifi-ce", looker, NULL) != 0) {
 		bus.looking = false;
+		if (bus.irq_mode) {
+			lx_os_irq_detach_all();
+			bus.irq_mode = false;
+		}
 		return (EAGAIN);
 	}
-	printf("lx: the driver (ath10k, snoc) is probed on the radio at 0x18800000; its copy engines are looked at once a "
-	    "millisecond\n");
+	printf("lx: the driver (ath10k, snoc) is probed on the radio at 0x18800000; its copy engines are %s\n", bus.irq_mode ?
+	    "taken care of when they interrupt (INTIDs 446..457, level; wifi_irq)" : "looked at once a millisecond");
 	began = lx_os_nanoseconds();
 	if ((ret = ath10k_snoc_probe(&radio_device)) != 0) {
 		lx_tell("lx: the driver's probe fails: %d\n", ret);
 		bus.looking = false;
+		if (bus.irq_mode) {
+			lx_os_irq_detach_all();
+			bus.irq_mode = false;
+		}
 		return (-ret);
 	}
 	ar = platform_get_drvdata(&radio_device);
@@ -582,6 +693,10 @@ lx_start(void)
 		ath10k_snoc_remove(&radio_device);
 		bus.ar = NULL;
 		bus.looking = false;
+		if (bus.irq_mode) {
+			lx_os_irq_detach_all();
+			bus.irq_mode = false;
+		}
 		return (ETIMEDOUT);
 	}
 	say_radio(ar);
@@ -627,6 +742,10 @@ lx_stop(void)
 	bus.looking = false;
 	while (bus.looks) {
 		lx_pause_ms(1);
+	}
+	if (bus.irq_mode) {
+		lx_os_irq_detach_all();		/* (returns when no function of it runs) */
+		bus.irq_mode = false;
 	}
 	lx_tell("lx: the driver is down again\n");
 }
