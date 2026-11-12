@@ -1355,12 +1355,14 @@ lite_ui(void)
 		return;         /* not asked for: whatever the person set in Settings stays */
 	}
 	on = arg[8] != '0';
-	CFPreferencesSetValue(CFSTR("ReduceMotionEnabled"), on ? kCFBooleanTrue : kCFBooleanFalse, domain,
+	/* lite_ui=2: only Reduce Transparency (the blurs, the larger cost); the zoom of apps opening and closing stays */
+	bool motion = on && arg[8] != '2';
+	CFPreferencesSetValue(CFSTR("ReduceMotionEnabled"), motion ? kCFBooleanTrue : kCFBooleanFalse, domain,
 	    CFSTR("mobile"), kCFPreferencesAnyHost);
 	CFPreferencesSetValue(CFSTR("EnhancedBackgroundContrastEnabled"), on ? kCFBooleanTrue : kCFBooleanFalse, domain,
 	    CFSTR("mobile"), kCFPreferencesAnyHost);
 	CFPreferencesSynchronize(domain, CFSTR("mobile"), kCFPreferencesAnyHost);
-	say("hakios: lite_ui=%d: Reduce Motion and Reduce Transparency %s\n", on, on ? "on" : "off");
+	say("hakios: lite_ui=%c: Reduce Motion %s, Reduce Transparency %s\n", arg[8], motion ? "on" : "off", on ? "on" : "off");
 }
 
 __attribute__((constructor))
