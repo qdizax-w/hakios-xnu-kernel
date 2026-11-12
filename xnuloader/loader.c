@@ -34,7 +34,9 @@ struct payload_entry { char name[16]; uint32_t size; uint32_t reserved; };
  * number of kernel runs (nothing writes to it: the root is read-only).
  */
 #define RESIDENT_RD_OFFSET  0x08000000ULL
+#ifndef RESIDENT_RD_RESERVE                       /* LOADER_CFLAGS=-DRESIDENT_RD_RESERVE=... xnuloader/build.sh to change it */
 #define RESIDENT_RD_RESERVE 0x30000000ULL         /* RAM that must remain for the kernel itself */
+#endif
 #define PAGE_SIZE_MAX       0x4000ULL
 
 #define LOG_PARTITION       u"logdump"
