@@ -405,9 +405,44 @@ loader_log_append_msgbuf(void)
 	}
 }
 
+/*
+ * Who asked, and on which processor -- into the log at once. On a processor that is not the boot one the rest of the return
+ * is the boot processor's, and if that one never answers (the run ends "hung") nothing below runs: the panic buffer, whose
+ * text a panic on this processor keeps there, would never reach the log. So on such a processor it is copied in here too.
+ */
+/* (drivers/wifi/hakios.wifi.c: the radio's state in a line, formatted only; weak, for kernels built without that driver) */
+extern void hakios_wifi_note(char *buffer, size_t size) __attribute__((weak));
+
+static void
+loader_return_note(void *caller)
+{
+	static int noted;
+	char line[256];
+
+	if (noted++) {
+		return;
+	}
+	snprintf(line, sizeof(line), "\n--- loader_return() from %p on cpu %d (the boot processor is cpu %d) ---\n",
+	    caller, cpu_number(), ml_get_boot_cpu_number());
+	loader_log_puts(line);
+	if (hakios_wifi_note != NULL) {
+		hakios_wifi_note(line, sizeof(line));
+		loader_log_puts(line);
+	}
+	/* (on the boot processor too: the return can stop before the copy at its end -- stopping the others, a quiesce) */
+	if (debug_buf_base != NULL && debug_buf_ptr > debug_buf_base && (size_t)(debug_buf_ptr - debug_buf_base) < 256 * 1024) {
+		loader_log_puts("--- panic buffer (copied at the start of the return) ---\n");
+		for (const char *c = debug_buf_base; c < debug_buf_ptr; c++) {
+			loader_log_putc(*c);
+		}
+		loader_log_puts("--- end of the panic buffer ---\n");
+	}
+}
+
 void
 loader_return(void)
 {
+	loader_return_note(__builtin_return_address(0));
 #if defined(GENERIC_PSCI_SMP)
 	/*
 	 * With more than one processor: the others switch themselves off first, and the rest of
