@@ -9,5 +9,12 @@ for d in $PATH; do
 	[ "$d" = "$here" ] && continue
 	[ -x "$d/timeout" ] && "$d/timeout" --version 2>/dev/null | grep -q 'GNU coreutils' && exec "$d/timeout" "$@"
 done
-echo "timeout: no GNU timeout (MacPorts: port install coreutils; Homebrew: brew install coreutils)" >&2
-exit 127
+exec perl -e '
+	my $secs = shift; $secs =~ s/s$//;
+	my $pid = fork() // die "timeout: fork: $!\n";
+	if ($pid == 0) { exec @ARGV or die "timeout: $ARGV[0]: $!\n"; }
+	local $SIG{ALRM} = sub { kill "TERM", $pid; waitpid($pid, 0); exit 124; };
+	alarm $secs;
+	waitpid($pid, 0);
+	exit($? & 127 ? 128 + ($? & 127) : $? >> 8);
+' "$@"
