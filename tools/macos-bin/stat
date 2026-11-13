@@ -9,10 +9,5 @@ for d in $PATH; do
 	[ "$d" = "$here" ] && continue
 	[ -x "$d/stat" ] && "$d/stat" --version 2>/dev/null | grep -q 'GNU coreutils' && exec "$d/stat" "$@"
 done
-if [ "$1" = -c ]; then
-	case "$2" in
-	%s) shift 2; exec /usr/bin/stat -f %z "$@" ;;
-	%Y) shift 2; exec /usr/bin/stat -f %m "$@" ;;
-	esac
-fi
-exec /usr/bin/stat "$@"
+echo "stat: no GNU stat (MacPorts: port install coreutils; Homebrew: brew install coreutils)" >&2
+exit 127

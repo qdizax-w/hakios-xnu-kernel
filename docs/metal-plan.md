@@ -1,30 +1,15 @@
 # Metal on the Adreno: the plan, and where it stands
 
-**Where it stands, 4 November 2026.** The window server draws through Metal on the phone, on two paths, and the plan below is done as far
-as that: hakios-metal at 100 to 104 frames a second in page swipes (about 90 in Settings' scroll), UniXNU's Metal on Vulkan at 50 to 57, on a 120 Hz panel. 120 has not
-been reached. What to read now: [Metal on the Adreno](reference/metal.md) and [the measurements](reference/metal-measurements.md).
-Everything below the next section is the record of how it went, with the dates, and says what was known then.
-
-## What became of the plan
-
-| Question the plan left open | The answer |
-|---|---|
-| Steps 3 to 7 (buffers, library, queue, render, present) | done on the phone, in [hakios-metal](https://github.com/oosexgang/hakios-metal) and `userland/src/HakiosMetalCA.m` (`METAL_PLUGIN=ca`) |
-| Compiler or Metal on Vulkan, "which is less work from here"? | both were done; on this GPU the direct compiler is about twice as fast today |
-| QuartzCore's `default.metallib`, which this system has not got | `tools/ca-metallib.py` makes it on your machine, from QuartzCore's own variants and a later CoreAnimation's library you supply |
-| `metal=1` kills the window server | no longer: `tools/metal-run.sh` runs with it on, and it is still off by default |
-| Whether the framebuffer counts frames | it does, every 5 s (`tools/metal-run.sh`'s summary); `tools/frames.py` counts them per gesture from the `tl:` lines |
-
 Read `docs/ru/metal.md` (why Metal is not simply missing, and what is on each side of the wall) and `docs/air.md` (the
-shader compiler) first. The rest of this file is the order of work, with how each step is checked and where.
+shader compiler) first. This file is the order of work, with how each step is checked and where.
 
 ## The three parts
 
 | Part | What it is | State |
 |---|---|---|
 | **A. The shader compiler** | Apple's shader bitcode (AIR, in a `.metallib`) into Mesa's NIR, so that ir3 (the compiler behind the OpenGL ES that already runs) makes Adreno code | largely done: 321 of the system's 456 shader modules reach ir3, 54 have run on the phone's GPU (`docs/air.md`, `docs/air-report.md`) |
-| **B. The device** | what Metal loads: a bundle with a subclass of Metal's private `_MTLDevice`, and the objects it hands out (buffers, libraries, pipeline states, queues, command buffers, encoders: 53 classes and about 1200 methods in Apple's own) | done for the window server: `userland/src/HakiosMetalCA.m` over hakios-metal; or UniXNU's frontend with `metal_m2v=1` |
-| **C. The kernel side** | submitting work to the GPU for a Metal client, with memory and fences | done: `HakiosGPUUserClient` (`drivers/gpu/hakios.gpu.cpp`) serves both paths; request `0x7d` takes a client's own pages as a buffer |
+| **B. The device** | what Metal loads: a bundle with a subclass of Metal's private `_MTLDevice`, and the objects it hands out (buffers, libraries, pipeline states, queues, command buffers, encoders: 53 classes and about 1200 methods in Apple's own) | step 1 ran in QEMU; buffers and libraries (step two, below) are written and checked on a Mac |
+| **C. The kernel side** | submitting work to the GPU for a Metal client, with memory and fences | the GPU already has a user client for Mesa (`drivers/gpu/hakios.gpu.cpp`, `HakiosGPUUserClient`); it is not connected to B |
 
 What "real Metal" would be, and why games are out of reach, is argued in `docs/ru/metal.md` section 9.4: that has not
 changed. What this plan aims at is the part that is within reach: **Metal clients of the system itself** (the window
@@ -113,18 +98,18 @@ What the plug-in now makes, in `userland/src/HakiosMetal.m`:
 
 How it was checked, and what that does not show:
 
-- `tools/metallib-test.sh DIR`: the C reading and `tools/metallib.py` agree on every function of every `.metallib` of the Darwin userland 16.5
+- `tools/metallib-test.sh DIR`: the C reading and `tools/metallib.py` agree on every function of every `.metallib` of the iOS 16.5
   system (the five MTLB files; the five runtime libraries of `AGXMetalA11.bundle` are another format, and both refuse them) and of
   macOS's; a file made by the test and then cut short at every length, and with each offset and length bent outside it, is refused
   every time, under the address and undefined-behaviour sanitizers. One correction came out of it: the header's second word at
   0x20 is the function list's length after its count, not its end (`tools/metallib.py` calls it `funcs_end` and does not use it).
 - `tools/metal-plugin-test.sh DIR`: the plug-in built for macOS, its device made the way Metal makes it, on the Mac's own
   `_MTLDevice`, `_MTLResource`, `_MTLLibrary`, `_MTLFunction`: buffers written, read back, copied, refused over `maxBufferLength`,
-  freed (and the caller's deallocator called); the five Darwin libraries read (36, 135, 11, 274 and 0 functions; the last is
+  freed (and the caller's deallocator called); the five iOS libraries read (36, 135, 11, 274 and 0 functions; the last is
   SafariSharedUI's, a header and nothing else), every function made by its name with its type, every module LLVM bitcode. All
-  under the address sanitizer. **macOS's Metal is not Darwin 16.5's**: this shows the plug-in's own logic, not that Darwin's Metal is
+  under the address sanitizer. **macOS's Metal is not iOS 16.5's**: this shows the plug-in's own logic, not that iOS's Metal is
   content with these objects.
-- Built for Darwin userland 16.5 (`-Wall -Wextra`, no warnings). Not yet run on Darwin: `metal_test` asks "what the device makes" in a process of
+- Built for iOS 16.5 (`-Wall -Wextra`, no warnings). Not yet run on iOS: `metal_test` asks "what the device makes" in a process of
   its own (`RC_JOBS=rc.jobs.metal`, `metal=1`), and its line is the result that goes here.
 
 Still nothing is drawn or computed: a pipeline made of these functions is the empty stand-in of step one. The next step is the
@@ -134,33 +119,28 @@ command buffer and compute encoder on the GPU's buffers (part C), which need the
 ## What UniXNU's AdrenoMetal showed, and what was taken
 
 [UniXNU](https://github.com/UniXNU) runs iPadOS 17 on a Xiaomi Pad 6S Pro (SM8550, Adreno 740), and its
-[AdrenoMetal](https://github.com/UniXNU/AdrenoMetal) (MIT) composes the system UI on the GPU. Read on 27 October 2026; the facts below
-are written here in our own words and code, with the source named where it is used. Since 3 November `tools/mk-m2v.sh` also fetches and
-builds it on your machine, and only our patches to it are in this repository (`tools/m2v/`): [Metal on the Adreno](reference/metal.md),
-[third-party licenses](../THIRD_PARTY_LICENSES.md).
+[AdrenoMetal](https://github.com/UniXNU/AdrenoMetal) (MIT) composes the system UI on the GPU. Read on 27 October 2026; no code of
+it is in this repository, the facts below are written here in our own words and code, with the source named where it is used.
 
 - **Their route is Metal on Vulkan**: the plug-in's device is a subclass of `_MTLDevice` (as ours), and every Metal object is
   translated by a runtime of theirs ("metal2vulkan", `bridge/NativeMetalObjects.rs`) onto Turnip, Mesa's Vulkan driver for Adreno,
   over the kernel's GPU interface. Ours is AIR through NIR to ir3 directly (part A), on the same Mesa. Turnip supports the A6xx
-  generation our Adreno 642L belongs to, so their route was open to this port as well. On 3 November it was taken too, and the two
-  now run side by side, chosen at boot.
+  generation our Adreno 642L belongs to, so their route is open to this port as well; which of the two is less work from here is
+  the question of the next step, and it is not decided here.
 - **Universal metallibs.** Newer systems ship framework libraries as a fat container (0xCAFEBABE) of an AIR64 slice and a binary
   for Apple's GPUs (QuartzCore's `default.metallib` on iPadOS 17). `hakios_metallib_thin()` takes the AIR64 slice, as Metal does;
-  `tools/metallib-test.sh` and `tools/metal-plugin-test.sh` check it. Darwin 16.5's libraries are all thin.
+  `tools/metallib-test.sh` and `tools/metal-plugin-test.sh` check it. iOS 16.5's libraries are all thin.
 - **CoreImage's limits.** `CIMetalDeviceGetLimits` reads `dedicatedMemorySize` and `sharedMemorySize`, which `_MTLDevice` does
   not answer; without them every `CIContext` throws (iconservicesagent ended over symbol glyphs there). The device now answers
   them, `isLowPower`, `isRemovable`, `isHeadless`, and `supportsFeatureSet:` (NO: the base reads Apple's tables).
 - **Clients by a file.** A file beside the bundle names the processes shown the device. `HakiosMetal.clients` does the same here,
   on top of `metal=N`.
-- **The window server needs QuartzCore's own `default.metallib`.** Their system image has it; Darwin 16.5's (this port's) does not,
-  which is the wall of step 7 above. It is not something the plug-in or this repository can supply, the library being Apple's:
-  `tools/ca-metallib.py` makes one on your machine from what you supply.
+- **The window server needs QuartzCore's own `default.metallib`.** Their system image has it; iOS 16.5's (this port's) does not,
+  which is the wall of step 7 above. It is not something the plug-in can supply: the library is Apple's.
 
 ## Frame skips
 
-(Written before Metal drew anything. Frames are counted now: [how to measure](reference/metal.md#measure).)
-
-A dropped frame is not a Metal problem, and Metal would not cure it: the screen of this port was then drawn by
+A dropped frame is not a Metal problem, and Metal would not cure it: the screen of this port is drawn today by
 CoreAnimation's OpenGL ES renderer through Mesa (`gpu=1`), and its pace depends on the submit path, the fences and the
 present. What to measure first, on the phone, is already counted: `gGPUStat` in `drivers/gpu/hakios.gpu.cpp` (submissions,
 waits, what each cost, every five seconds). Whether the framebuffer stand-in (`MiniIOMobileFramebuffer.cpp`) counts
@@ -171,6 +151,5 @@ in those numbers is in the compositor, not the driver. This needs a stable GPU r
 
 ## What is not claimed
 
-That 120 frames a second has been reached: it has not. That a Metal program in general runs: only the window server's use of Metal is
-shown, and the checks of `metal_test`, `vk_test` and `m2v_test`. That games run: section 9.4 of `docs/ru/metal.md` still stands. The
-sections above dated 27 October say what was seen in QEMU then; the phone came after them.
+Nothing here draws. No Metal client has used this device for anything: the first one that tried (the window server) asked
+for a command queue and stopped. Everything above was seen in QEMU; none of it was run on the phone.

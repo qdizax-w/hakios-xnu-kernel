@@ -263,11 +263,10 @@ NEW_README = """# {title} ({name})
 
 A HakiOS device repository: what is true of this device and of no other. The kernel, the loader, the drivers and the tools are
 the common repository's; the {soc} family's facts are in `soc/`, carried with the device. How the three are put together:
-[docs/porting/repositories.md](https://github.com/oosexgang/hakios-xnu-kernel/blob/main/docs/porting/repositories.md).
+[docs/porting/repositories.md](https://github.com/oosexgang/hakios/blob/main/docs/porting/repositories.md).
 
 | File | What |
 |---|---|
-| `metal.args` | what `tools/metal-run.sh` gives this phone: its cores, its panel's rate, the threads that copy frames, the touch poll |
 | `device.conf` | what the device is, and how far each part of it works: its page in the documentation is made from it |
 | `configs/{name}_defconfig` | the common kernel, the SoC's fragment, this device's: `make {name}_defconfig` |
 | `configs/{name}.config` | what is this device's own: the drivers built in, the arguments it needs |
@@ -321,11 +320,6 @@ def cmd_new(a):
                 "device %s\n\ttitle       %s\n\tvendor      %s\n\tsoc         %s\n\tdefconfig   %s_defconfig\n"
                 "\tmaintainer  %s\n\tstatus      display     partial   UEFI's framebuffer, through the loader (to be checked)\n" %
                 (name, name, a.title, a.vendor, a.soc, name, a.maintainer))
-    with open(os.path.join(top, "metal.args"), "w", encoding="utf-8") as f:
-        f.write("# what tools/metal-run.sh gives this phone (docs/porting/index.md): its big core and cores, its panel's rate,\n"
-                "# how many threads copy frames, how often the touch screen is read. A line of boot-arguments; # is a comment.\n"
-                "# fb_intf=<physical> as well, if its SoC's display interface is known: frames are then written behind the scan.\n"
-                "fb_hz=60 fb_threads=3\n")
     with open(os.path.join(top, "configs", name + "_defconfig"), "w", encoding="utf-8") as f:
         f.write("# HakiOS defconfig for the %s (%s): the common kernel, %s, and this device's own.\n#include common_defconfig\n%s"
                 "#include %s.config\n" % (a.title, name, "the %s family's facts" % a.soc if a.soc != "none" else "no SoC repository",
